@@ -61,8 +61,11 @@ for (let i = 0; i < list.length; i++) {
   const ext = /vue/i.test(q.lang || '') ? 'vue' : 'html';
   const file = path.join(DIR, String(i).padStart(2, '0') + '-' + (q.unit || '').replace(/[\\/:*?"<>|]/g, '_') + '.' + ext);
   fs.writeFileSync(file, code, 'utf8');
-  const looksLikeCode = /<\s*(html|script|template|div|body|head)/i.test(code) || /createApp|Vue/.test(code);
-  console.log(`  [${i}] ${String(q.unit).slice(0, 24).padEnd(26)} ${q.lang} 代码 ${code.length} 字节 ${looksLikeCode ? '✓像代码' : '✗可疑'} 已答=${q.submitted || '无'}`);
+  // 平台的 referenceAnswer 有时不是代码而是一句中文说明（如「具体内容请见学习视频和讲义」），
+  // 这种内容被当 HTML 也能「编译成功」，必须在这里就判掉，否则下游会虚报通过率
+  const tags = (code.match(/<(html|head|body|div|script|template|style)[\s>]/gi) || []).length;
+  const looksLikeCode = tags >= 2 && code.length > 120;
+  console.log(`  [${i}] ${String(q.unit).slice(0, 24).padEnd(26)} ${q.lang} ${String(code.length).padStart(5)} 字节 ${looksLikeCode ? '✓ 真代码' : '✗ 不是代码（平台只给了说明文字，需另写）'} 已答=${q.submitted || '无'}`);
   console.log(`      题干: ${plain(q.content).slice(0, 70)}`);
   console.log(`      首行: ${code.split(String.fromCharCode(10))[0].slice(0, 76)}`);
   if (!looksLikeCode) console.log(`      !!! 内容预览: ${code.slice(0, 160)}`);
