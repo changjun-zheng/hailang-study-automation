@@ -69,12 +69,12 @@ const raw = await evl(`(async()=>{
         if(q.questionType===1) verifiable=right.length===1&&norm(right)===norm(q.referenceAnswer);
         else if(q.questionType===2) verifiable=right.length>1&&norm(right)===norm(q.referenceAnswer);
         else if(q.questionType===3) verifiable=/^[01]$/.test(String(q.referenceAnswer==null?'':q.referenceAnswer).trim());
-        return {qid:q.id,type:q.questionType,ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable};
+        return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable};
       });
       const todo=items.filter(i=>!i.answered&&i.verifiable);
       const sk=items.filter(i=>!i.answered&&!i.verifiable);
       rec.total=items.length; rec.answered=items.filter(i=>i.answered).length; rec.canDo=todo.length;
-      rec.skip=sk.length; rec.skipTypes=[...new Set(sk.map(i=>i.type))];
+      rec.skip=sk.length; rec.skipTypes=[...new Set(sk.map(i=>i.type+'='+i.tname))];
       if(${JSON.stringify(APPLY)}&&oid&&todo.length){
         const body={poList:todo.map(i=>({submitAnswer:i.ref,exercisesId:i.qid,questionType:i.type,referenceAnswer:i.ref,recordId:null,updateCount:0})),
           operationId:oid,studentCourseId:sid,studentId:me.id,courseId:course.id,unitId:s.unitId,videoId:s.videoId,majorId:me.majorId,version:course.version};
@@ -98,7 +98,7 @@ const withQ = r.units.filter((u) => u.total > 0);
 console.log(`\n课程「${r.course}」：${withQ.length} 个单元有习题，共 ${sum('total')} 道`);
 console.log(`  已答 ${sum('answered')} 道`);
 console.log(`  可提交（客观题 + 参考答案与选项双证一致 + 未答过）${sum('canDo')} 道`);
-console.log(`  跳过 ${sum('skip')} 道，题型=${[...new Set(r.units.flatMap((u) => u.skipTypes))].join('/')}（编程题要写代码，不代做）`);
+console.log(`  跳过 ${sum('skip')} 道：${[...new Set(r.units.flatMap((u) => u.skipTypes))].join('、') || '无'} —— 主观题/需要写代码或画图，不代做`);
 for (const u of r.units.filter((x) => x.submit)) console.log(`  提交 ${u.barrier} / ${u.unitName}: 写入 code=${u.submit.code} 共${u.submit.written}条 ${u.submit.msg} | 交卷 code=${u.submit.finalize} ${u.submit.finalizeMsg}`);
 if (!APPLY) console.log('\n（只读统计，没有提交任何东西。加 --apply 才写）');
 ws.close(); process.exit(0);
