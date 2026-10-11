@@ -15,6 +15,13 @@ const has = (n) => process.argv.includes(n);
 const COURSE = arg('--course', '软件系统分析与设计');
 const ONLY_BARRIER = arg('--barrier', '');
 const DRY = has('--dry');
+// --answer：每关视频记账完成后，接着做这一关的客观题（复用 answer-exercises.mjs，不复制答题逻辑）。
+// 默认关 —— 往账号里写答案必须是显式选择。
+const ANSWER = has('--answer');
+// --answer-only：跳过刷视频，只跑答题。用来单独验证答题链路，也方便只想补题的时候用。
+const ANSWER_ONLY = has('--answer-only');
+// 答题默认只统计不提交；必须再显式给 --apply 才往账号里写答案
+const APPLY_ANSWER = has('--apply');
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w:)/, '$1'));
 const STATE = path.join(ROOT, '.runner-state.json');
 // HAILANG_RATE 用来临时改注入脚本的默认倍速（验「服务端是不是只认实时观看」时设成 1）；不设就是脚本里的 2。
@@ -171,6 +178,13 @@ log(`课程=${course.name} 已学=${course.learned} 任务=${course.haveUnit}/${
 const barriersResp = await getJson(`/gateway/system/orgStudent/listCourseBarrier?courseId=${course.id}&majorId=${majorId}&userId=${me}&version=${course.version}&studentCourseId=${course.studentCourseId}`);
 const bList = (barriersResp.data || []).slice().sort((a, b) => (a.sortCode || 0) - (b.sortCode || 0));
 log(`关卡数=${bList.length}`);
+if (ANSWER_ONLY) {
+  log('只答题，不刷视频');
+  await runAnswerScript(APPLY_ANSWER ? ['--apply'] : []);
+  ws.close();
+  process.exit(0);
+}
+
 
 const state = fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : { done: {}, exercises: {} };
 const save = () => fs.writeFileSync(STATE, JSON.stringify(state, null, 1));
@@ -216,6 +230,24 @@ async function nowPlaying() {
 //   · Input.dispatchKeyEvent 空格 → 站点自己的播放器控制器进入播放态，此后每 15 秒发一次
 //                                  updateStudyVideoPlan 心跳，并出现 saveStudyVideoPlan 位置上报
 // 也就是说心跳挂在控制器的状态机上，不在 <video> 元素上；绕过控制器就等于不记账。
+// 用子进程复用 answer-exercises.mjs：整条答题链路（operationId、逐单元释放会话、
+// 三种客观题判据分开写）都在那边验证过了，这里不重写一遍，免得两份实现漂移。
+async function runAnswerScript(extraArgs) {
+  const { spawn } = await import('node:child_process');
+  return new Promise((res) => {
+    const p = spawn(process.execPath, ['answer-exercises.mjs', '--course', COURSE, ...extraArgs], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    let buf = '';
+    p.stdout.on('data', (d) => { buf += d; });
+    p.stderr.on('data', (d) => { buf += d; });
+    p.on('exit', (code) => {
+      const lines = buf.split(String.fromCharCode(10)).filter((l) => /课程「|已答|可提交|跳过 |提交 /.test(l));
+      for (const l of lines) log('  [答题] ' + l.trim());
+      if (!lines.length) log('  [答题] 没有可报告的输出（exit ' + code + '）：' + buf.replace(/\s+/g, ' ').slice(0, 160));
+      res(code);
+    });
+  });
+}
+
 async function trustedStart() {
   const ready = await evl(`(()=>{const v=document.querySelector('video');if(!v)return 'NOVIDEO';v.muted=true;try{v.focus()}catch(e){}return 'ok'})()`)
   if (ready === 'NOVIDEO') return;
@@ -691,6 +723,12 @@ if (notDone.length) {
   log(`✗ 服务端仍有 ${notDone.length}/${allServer.length} 条未记为完成（例：${notDone.slice(0, 3).map((v) => v.name).join('、')}）→ 已退回本地标记，以退出码 3 让守护再来一轮`);
   ws.close();
   process.exit(3);
+}
+if (ANSWER) {
+  log('全部视频已记账，开始做客观题');
+  await runAnswerScript(APPLY_ANSWER ? ['--apply'] : []);
+} else {
+  log('（没加 --answer，本轮只刷视频不做题）');
 }
 log(`结束。服务端确认 ${allServer.length} 条视频全部已完成`);
 ws.close();
