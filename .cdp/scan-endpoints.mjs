@@ -9,7 +9,7 @@ const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w
 const KEEP = JSON.parse(fs.readFileSync(path.join(ROOT, '.cdp', 'runner-tab.json'), 'utf8')).id;
 const KW = process.argv[2] || 'xercise';
 
-const full = (await (await fetch(BASE + '/json/list')).json()).find((t) => t.id === KEEP && t.type === 'page');
+const _all = (await (await fetch(BASE + "/json/list")).json()).filter((t) => t.type === "page" && t.url.includes("study.cqie.edu.cn"));const full = _all.find((t) => t.id === KEEP) || _all[0];
 if (!full) {
   console.log('找不到标签页');
   process.exit(1);
