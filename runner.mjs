@@ -661,13 +661,15 @@ for (const b of bList) {
   }
   // 逐条核对：本地记完、但服务端 studyVideoStatus 不是 2 的，退回等下次再补。
   // 刻意不再「整关卡作废 + 当场重播」：那会让同一批视频被反复重烧（实测白烧过 7 小时）。
-  // 加 12 小时宽限期：实测服务端有延迟批处理（播完整整 8 小时才写入的记录出现过 3 条），
-  // 刚播完就退回会让下一次运行把同一批视频重播，而那条记录本来马上就要落库。
-  const GRACE = 12 * 3600 * 1000;
+  // 只留 5 分钟宽限，够吸收"刚播完心跳还没落库"的窗口。
+  // 原来这里是 12 小时，理由写的"服务端有延迟批处理"——那个解释是错的：
+  // 播了不记账的真实原因是起播用了 v.play() 没让站点播放器组件进入播放态（见 trustedStart 的注释）。
+  // 宽限期太长会把那 31 条白播的视频一直卡在"本地已完成"里，永远等不到用正确方式重播。
+  const GRACE = 5 * 60 * 1000;
   const notYet = (await videosOf(b.id)).filter((v) => state.done[v.videoId] && v.videoStatus !== 2);
   const unacked = notYet.filter((v) => Date.now() - new Date(state.done[v.videoId].at).getTime() > GRACE);
   const inGrace = notYet.length - unacked.length;
-  if (inGrace > 0) log(`  ⏳ ${inGrace} 条播完但服务端还没记，在 12 小时宽限期内不退回（有延迟批处理）`);
+  if (inGrace > 0) log(`  ⏳ ${inGrace} 条播完但服务端还没记，5 分钟宽限期内先不退回`);
   if (unacked.length) {
     unacked.forEach((v) => delete state.done[v.videoId]);
     save();
