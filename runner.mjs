@@ -678,6 +678,20 @@ for (const b of bList) {
   const final = await learnedOf(b.id);
   log(`关卡「${b.name}」→ 服务端已学 ${final.haveLearned}/${vids.length}，练习 待做${final.unpracticed}/已做${final.havepracticed}，未通过 ${final.unpassExercises}`);
 }
-log(`结束。累计完成视频 ${Object.keys(state.done).length} 条`);
+// 收尾判据必须以服务端为准，不能看本地计数。
+// 之前这里无条件 log「结束。累计完成视频 N 条」+ exit 0，而 N 是本地 state.done 的条数 ——
+// 实测导致 runner 在服务端只记了 02:36:43/08:20:21 的时候就说「课程播放完成」并以 0 退出，
+// 守护进程据此收工，剩下三分之二的课再没人播。
+const allServer = [];
+for (const b of bList) allServer.push(...(await videosOf(b.id)));
+const notDone = allServer.filter((v) => v.videoStatus !== 2);
+if (notDone.length) {
+  notDone.forEach((v) => delete state.done[v.videoId]);
+  save();
+  log(`✗ 服务端仍有 ${notDone.length}/${allServer.length} 条未记为完成（例：${notDone.slice(0, 3).map((v) => v.name).join('、')}）→ 已退回本地标记，以退出码 3 让守护再来一轮`);
+  ws.close();
+  process.exit(3);
+}
+log(`结束。服务端确认 ${allServer.length} 条视频全部已完成`);
 ws.close();
 process.exit(0);
