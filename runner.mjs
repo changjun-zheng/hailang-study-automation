@@ -209,18 +209,36 @@ async function nowPlaying() {
         paused: v ? v.paused : true, ended: v ? v.ended : false }); })()`)
   );
 }
-// 起播优先用静音 play()：实测浏览器对手势缺失的 muted play() 放行，而按坐标的真实点击
-// 依赖「视频在视口内 + 标签页在前台」，脆得多。点击只作为兜底。
-async function trustedClickVideo() {
-  const played = await evl(`(()=>{const v=document.querySelector('video');if(!v)return 'NOVIDEO';v.muted=true;return v.play().then(()=>'ok').catch(e=>'rejected:'+e.name)})()`).catch(() => 'eval失败');
-  if (played === 'ok') return;
+// 起播必须走「可信输入」，而且键盘比坐标点击可靠得多。
+// 实测对比（同一门课、同样的 headless 参数、视频都真的在走）：
+//   · 直接 v.play()            → 画面推进，但服务端零记录（31 条视频都是这么白播的）
+//   · 点画面中心               → 命中的是播放器叠的隐藏 input.d-player-input，控制器不响应
+//   · Input.dispatchKeyEvent 空格 → 站点自己的播放器控制器进入播放态，此后每 15 秒发一次
+//                                  updateStudyVideoPlan 心跳，并出现 saveStudyVideoPlan 位置上报
+// 也就是说心跳挂在控制器的状态机上，不在 <video> 元素上；绕过控制器就等于不记账。
+async function trustedStart() {
+  const ready = await evl(`(()=>{const v=document.querySelector('video');if(!v)return 'NOVIDEO';v.muted=true;try{v.focus()}catch(e){}return 'ok'})()`)
+  if (ready === 'NOVIDEO') return;
+  for (const type of ['keyDown', 'keyUp']) {
+    await send('Input.dispatchKeyEvent', { type, key: ' ', code: 'Space', text: ' ', windowsVirtualKeyCode: 32 }).catch(() => {});
+  }
+  await sleep(1600);
+  let s = await nowPlaying().catch(() => null);
+  if (s && !s.paused) return;
+  // 键盘没起来才退回坐标点击（点在播放器容器上，不是画面中心那个隐藏 input）
   const box = JSON.parse(
-    await evl(`(() => { const v = document.querySelector('video'); if (!v) return '{"x":0,"y":0}'; const r = v.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)}); })()`)
+    await evl(`(() => { const e = document.querySelector('[class*=d-player-control],[class*=player-control],[class*=play-btn],i,[class*=play]') || document.querySelector('video'); if (!e) return '{"x":0,"y":0}'; const r = e.getBoundingClientRect(); return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)}); })()`)
   );
-  if (!box.x) return;
-  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y, buttons: 0 });
-  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1, buttons: 1 });
-  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1, buttons: 0 });
+  if (box.x) {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y, buttons: 0 });
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1, buttons: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1, buttons: 0 });
+    await sleep(1600);
+    s = await nowPlaying().catch(() => null);
+    if (s && !s.paused) return;
+  }
+  // 最后才是脚本 play()：能让画面动，但不会带来心跳，只用来避免整条流程卡死
+  await evl(`(()=>{const v=document.querySelector('video');if(v)v.play().catch(()=>{})})()`);
 }
 // 标签页在后台时 Chrome 会推迟媒体加载（readyState 恒为 0、duration=NaN），所以必须把自己顶到前台
 async function activateTab() {
@@ -447,12 +465,12 @@ async function watchBarrier(vids) {
       cur = await nowPlaying().catch(() => null);
       if (cur && cur.vid) break;
     }
-    await trustedClickVideo();
+    await trustedStart();
     for (let i = 0; i < 40; i++) {
       await sleep(1500);
       cur = await nowPlaying().catch(() => null);
       if (cur && cur.d > 0 && !cur.paused) return cur;
-      if (i % 8 === 7) await trustedClickVideo();
+      if (i % 8 === 7) await trustedStart();
     }
     return cur;
   }
@@ -506,7 +524,7 @@ async function watchBarrier(vids) {
       await sleep(6000);
       continue;
     }
-    if (s.paused) await trustedClickVideo();
+    if (s.paused) await trustedStart();
     if (s.vid === prev && lastT >= 0 && Math.abs(s.t - lastT) < 0.2) stuck++;
     else stuck = 0;
     if (stuck > 35) {
@@ -554,14 +572,14 @@ async function watchNodes() {
       save();
       continue;
     }
-    await trustedClickVideo();
+    await trustedStart();
     const seenLabels = new Set();
     let done = false;
     for (let i = 0; i < 400; i++) {
       await sleep(2000);
       s = await nodeState();
       if (!s) continue;
-      if (s.paused) await trustedClickVideo();
+      if (s.paused) await trustedStart();
       if (s.label) seenLabels.add(s.label);
       const atEnd = s.ended || (s.d > 0 && s.t >= s.d - 1.5);
       if (atEnd) {
