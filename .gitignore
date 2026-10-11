@@ -12,5 +12,8 @@ exercises-*.json
 # 实验过程的原始输出
 .cdp/*.txt
 
+# 还原出来的编程题参考答案（平台下发的原题答案，不入库）
+.cdp/codeq/
+
 node_modules/
 .DS_Store
