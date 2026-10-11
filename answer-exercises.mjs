@@ -15,6 +15,8 @@ const APPLY = process.argv.includes('--apply');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '前端框架开发技术');
 const ONLY = arg('--unit', '');   // 只处理单元名包含它的单元，用来做小范围验证
+// 主观题（5 简答 / 6 问答）默认不提交：那是人工会阅的内容。给 --subjective 才把平台下发的参考答案交上去。
+const SUBJECTIVE = process.argv.includes('--subjective');   // 只处理单元名包含它的单元，用来做小范围验证
 const ps = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page');
 const page = ps.find((t) => t.url.includes('study.cqie.edu.cn'));
 if (!page) { console.error('连不上 study.cqie.edu.cn 的标签页：先跑 .cdp/launch-visible.ps1 或 node runner.mjs'); process.exit(1); }
@@ -69,6 +71,8 @@ const raw = await evl(`(async()=>{
         if(q.questionType===1) verifiable=right.length===1&&norm(right)===norm(q.referenceAnswer);
         else if(q.questionType===2) verifiable=right.length>1&&norm(right)===norm(q.referenceAnswer);
         else if(q.questionType===3) verifiable=/^[01]$/.test(String(q.referenceAnswer==null?'':q.referenceAnswer).trim());
+        // 主观题：只有显式 --subjective 才纳入，且要求平台确实下发了非空文字答案
+        else if(${JSON.stringify(SUBJECTIVE)}&&(q.questionType===5||q.questionType===6)) verifiable=String(q.referenceAnswer||'').replace(/<[^>]+>/g,'').trim().length>0;
         return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable};
       });
       const todo=items.filter(i=>!i.answered&&i.verifiable);
