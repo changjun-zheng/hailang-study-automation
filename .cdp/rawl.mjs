@@ -1,0 +1,11 @@
+const BASE='http://127.0.0.1:9224';
+const tab=(await (await fetch(BASE+'/json/list')).json()).filter(t=>t.type==='page').find(t=>t.url.includes('MyCourse/Study'));
+let seq=0;const pend=new Map();const ws=new WebSocket(tab.webSocketDebuggerUrl);
+await new Promise((res,rej)=>{ws.onopen=res;ws.onerror=()=>rej(new Error('e'));ws.onmessage=m=>{const x=JSON.parse(m.data);if(x.id&&pend.has(x.id)){const p=pend.get(x.id);pend.delete(x.id);x.error?p.rej(new Error(x.error.message)):p.res(x.result)}}});
+const send=(method,params={})=>new Promise((res,rej)=>{const id=++seq;pend.set(id,{res,rej});ws.send(JSON.stringify({id,method,params}))});
+await send('Runtime.enable');
+const {result:obj}=await send('Runtime.evaluate',{expression:'document',returnByValue:false});
+const r=await send('DOMDebugger.getEventListeners',{objectId:obj.objectId,depth:0});
+const vc=r.listeners.filter(l=>l.type==='visibilitychange'||l.type==='selectionchange');
+console.log(JSON.stringify(vc.map(l=>({type:l.type,useCapture:l.useCapture,passive:l.passive,handlerKeys:Object.keys(l.handler||{}),handler:l.handler})),null,1).slice(0,1800));
+ws.close();process.exit(0);

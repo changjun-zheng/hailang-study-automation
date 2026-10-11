@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>静音/倍速默认值回归测试</title>
+  </head>
+  <body>
+    <!-- 复用同一个 video 元素，模拟站点播放器「换 src 但不重建元素」的真实行为 -->
+    <video id="v"></video>
+    <script>
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      // 资源地址故意用不存在的：本测试只关心 muted / playbackRate 属性，不需要真的能播
+      window.__scenario = async () => {
+        const v = document.getElementById('v');
+        const st = () => ({ muted: v.muted, rate: v.playbackRate, vol: v.volume });
+        const steps = [];
+        const chk = (name, cond, got) => steps.push({ name, ok: !!cond, got });
+
+        // A 第一条视频：脚本应上默认值（静音 + 2 倍）
+        v.src = 'http://127.0.0.1:8887/__none-1.mp4';
+        await sleep(2600);
+        let s = st();
+        chk('A 首条视频被静音', s.muted === true, JSON.stringify(s));
+        chk('B 首条视频 2 倍速', s.rate === 2, JSON.stringify(s));
+
+        // C 播放器在同一条视频上自己取消静音（他没过手）：应被抢回来
+        v.muted = false;
+        await sleep(2600);
+        s = st();
+        chk('C 播放器自己取消静音被抢回', s.muted === true, JSON.stringify(s));
+
+        // D 他亲手开声音（1.5 秒内有真实输入信号）：本条视频就该保持有声音
+        document.dispatchEvent(new Event('pointerdown'));
+        v.muted = false;
+        await sleep(3000);
+        s = st();
+        chk('D 他亲手开的声音不再被抢', s.muted === false, JSON.stringify(s));
+
+        // E 他亲手把倍速改成 1.5：本条视频不该被改回 2
+        document.dispatchEvent(new Event('pointerdown'));
+        v.playbackRate = 1.5;
+        await sleep(3000);
+        s = st();
+        chk('E 他亲手改的倍速不被覆盖', s.rate === 1.5, JSON.stringify(s));
+
+        // F 切到下一条视频：静音和倍速都要重新上默认值（这正是他反馈的「下一条又有声音」）
+        v.src = 'http://127.0.0.1:8887/__none-2.mp4';
+        await sleep(2600);
+        s = st();
+        chk('F 换下一条重新静音', s.muted === true, JSON.stringify(s));
+        chk('G 换下一条重新 2 倍速', s.rate === 2, JSON.stringify(s));
+
+        // H 播放器在下一条视频初始化时把倍速设回 1（没有真实输入）：应被抢回
+        document.dispatchEvent(new Event('pointerdown'));
+        await sleep(1700); // 让那次「输入」过期，模拟播放器稍后才重置
+        v.playbackRate = 1;
+        await sleep(2600);
+        s = st();
+        chk('H 播放器自己重置倍速被抢回', s.rate === 2, JSON.stringify(s));
+
+        return { steps, pass: steps.every((x) => x.ok) };
+      };
+    </script>
+  </body>
+</html>
