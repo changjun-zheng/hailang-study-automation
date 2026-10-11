@@ -129,13 +129,53 @@ Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState').get.call(
 
 `.cdp/` 下另有一百多个一次性探针脚本，是上面每条结论的取证现场，保留是因为**它们的失败同样是信息**（比如 `why-nocredit.mjs`、`cold-1x-test.mjs`、`click-vs-navigate.mjs`、`test-1x-credit.mjs` 各自排除掉一个假设）。
 
-## 四、练习/答题：通道探到了，但平台侧坏了
+## 四、自动答题（`answer-exercises.mjs`）
 
-`exercises.mjs` / `answer.mjs` / `export-exercises.mjs` 是这条线的产物。已跑通的：题库能读（前端框架课 67 道：29 单选 / 23 判断 / 4 多选 / 11 编程），`questionDetails`、`checkStudyRecordExercises`、`courseCatalogExercisesConfig/checkUpdateExercises` 都返回 200。
+```bash
+node answer-exercises.mjs --course 前端框架开发技术            # 只读：统计能答多少
+node answer-exercises.mjs --course 前端框架开发技术 --apply    # 真正提交
+node answer-exercises.mjs --course X --unit 使用生命周期函数 --apply   # 只做一个单元
+```
 
-卡住的：`exercisesList` 和 `createList` 稳定返回 **501**，且网页 UI 上同样报 501 —— 也就是**平台侧故障，不是脚本姿势问题**。另一门课（软件系统分析与设计）的 101 道练习是同一个症状，7 个假设逐一排除过。
+**先前记的「`exercisesList`/`createList` 稳定 501 是平台故障」是错的，这里更正**：501 的内容是
+`{"code":501,"msg":"操作ID不能为空"}` —— 是**我自己漏传了 `operationId`**。平台没坏。
 
-从前端 chunk 里扫出来的一条修正式结论：这门课走的接口族是 `studyKnowledgeExerciseRecord/*`（知识练习），不是排查过程中一直在试的 `studyRecordExercises/*`。扫描脚本 `.cdp/scan-page.js` 只做**窄口径字符串提取**（只取形似路径的字面量、按关键词过滤），不落盘任何源码。
+章节习题的完整链路（每步都实测 200）：
+
+```
+1 POST study/studyRecordExercises/exerciseBarrier              {studentCourseId, unitId}
+2 POST study/courseCatalogExercisesConfig/checkUpdateExercises {studentCourseId, courseId, majorId, unitId, version}
+       -> data.operationId  (uuid，有效期 30 秒)
+3 POST study/studyRecordExercises/exercisesList                {...}   -> 题目 + referenceAnswer
+4 POST study/studyRecordExercises/createExercisesList          {poList, operationId, ...}   写入答案
+5 POST study/studyRecordExercises/createList                   {poList, operationId, ...}   「提交练习」
+6 POST study/studyRecordExercises/clearStudentUnit             {studentCourseId, unitId}    「返回/关闭」
+```
+
+**最容易踩的一条**：平台**同一时刻只允许一个"打开中"的章节习题会话**。`exercisesList` 本身就占这个名额，
+没释放的话，对其它任何单元的调用都会返回
+
+```
+code:502  检测到您有正在进行中的【XX】章节习题，请前往…「提交练习」或点击页面内的「返回/关闭」退出
+```
+
+所以第 6 步不是可选的清理，而是**必须逐单元串行执行**的收尾 —— 少了它，一门 26 单元 67 道题的课会被误判成"只有 1 个单元有题"。
+
+**三种客观题的参考答案格式各不相同**，判据必须分开写：
+
+| 题型 | `referenceAnswer` | `optionVos` | 双证方式 |
+| --- | --- | --- | --- |
+| 1 单选 | 一个选项 id | 恰有一个 `answerFlag==1` | 两者必须完全相等 |
+| 2 多选 | 选项 id 用 `|` 连接 | 多个 `answerFlag==1` | 集合排序后必须相等 |
+| 3 判断 | 字面量 `"0"` / `"1"` | **空数组** | 无第二方证据，只校验取值域 |
+| 7 编程 | 一段 HTML 高亮代码 | 空 | **跳过，不代做** |
+
+只提交「客观题 + 判据通过 + 此前未作答」的题，因此重复运行是幂等的（实测跑两次，第二次显示"可提交 0 道"）。
+当前状态：该课 67 道中 5 道已答、53 道可自动作答、9 道编程题跳过。
+
+`exercises.mjs` / `answer.mjs` / `export-exercises.mjs` 是这条线上更早的尝试，接口族判断有错，保留作取证痕迹。
+
+## 五、还没解决的问题：程序化播放不计入进度
 
 ## 五、边界
 

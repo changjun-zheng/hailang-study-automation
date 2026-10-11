@@ -6,14 +6,15 @@ import path from 'node:path';
 
 const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w:)/, '$1'), '..');
-const KEEP = JSON.parse(fs.readFileSync(path.join(ROOT, '.cdp', 'runner-tab.json'), 'utf8')).id;
-const SC = '2c235454cef7b898bd11e77ad2b0d20c';
-const CID = 'e8716aab5bc18a56b115d3303f43555c';
-const MID = '9f07cf1e06d0a57957bd6be34efd3930';
-
-const full = (await (await fetch(BASE + '/json/list')).json()).find((t) => t.id === KEEP && t.type === 'page');
+const all = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page' && t.url.includes('study.cqie.edu.cn'));
+let KEEP = null;
+try { KEEP = JSON.parse(fs.readFileSync(path.join(ROOT, '.cdp', 'runner-tab.json'), 'utf8')).id; } catch (e) { }
+const SC = process.env.SC || '2c235454cef7b898bd11e77ad2b0d20c';
+const CID = process.env.CID || 'e8716aab5bc18a56b115d3303f43555c';
+const MID = process.env.MID || '9f07cf1e06d0a57957bd6be34efd3930';
+const full = all.find((t) => t.id === KEEP) || all[0];
 if (!full) {
-  console.log('找不到 runner 标签页（Chrome 在跑吗？）');
+  console.log('找不到 study 标签页（Chrome 在跑吗？）');
   process.exit(1);
 }
 const ws = new WebSocket(full.webSocketDebuggerUrl);

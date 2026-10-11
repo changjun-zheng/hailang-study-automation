@@ -6,6 +6,11 @@ $args = @(
   "--user-data-dir=$profile",
   '--no-first-run',
   '--no-default-browser-check',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-features=CalculateNativeWinOcclusion',
+  '--disable-renderer-backgrounding',
+  '--disable-background-timer-throttling',
+  '--autoplay-policy=no-user-gesture-required',
   '--window-position=120,80',
   '--window-size=1200,860',
   'https://study.cqie.edu.cn/login'

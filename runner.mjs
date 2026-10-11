@@ -293,43 +293,75 @@ async function parkWindow() {
     log('窗口没能挪到屏幕外: ' + e.message);
   }
 }
-// 换视频优先「点课程目录」而不是整页导航。
-// 依据：服务端的学习记录是在 updateEndTime 关闭监控会话时写的，而这个请求在整页导航时会随旧文档一起被销毁
-// （实测：同一条视频 1 倍速播满 881 秒再 URL 导航走 → 无记录；只播 60 秒再点目录切走 → 15:55:59 写入成功）。
+// 换视频优先「点课程目录」而不是整页导航：整页导航会把旧文档连同它还没发出的上报一起销毁。
+// ⚠️这里原来的注释引用过一条「只播 60 秒再点目录切走 → 写入成功」的实测，那条样本已作废
+// （当时窗口处于 minimized→hidden，媒体被 Chrome 推迟加载，等于没真的播）。
+// 目前唯一站得住的判据是 stopPos==片长 才算完成，而程序化播放从未触发过位置上报 —— 点目录是走站点自己流程的入口，值得先修通。
+//
+// 这个函数历史上成功 0 次，三个真因（前两个是我先前误判为"虚拟化/跨关卡"，实际是）：
+//   ① 调用时机太早 —— 导航后 3 秒目录面板还没渲染，直接报"没有这个条目"；所以要等 + 重试
+//   ② 整份目录列表在 DOM 里存在两份，取 els[0] 会拿到 display:none 那份，坐标落在视口外
+//   ③ 命中测试缺失：坐标上盖着别的元素时，事件发出去是静默打空，日志却显示"点了"
 // 返回 true 表示确实切到了目标视频。
 async function clickCatalog(v) {
+  const probe = `(async () => {
+    const want = ('视频：' + ${JSON.stringify(v.name)}).replace(/\\s+/g, '');
+    const norm = (e) => (e.textContent || '').replace(/\\s+/g, '');
+    const laid = (e) => { const r = e.getBoundingClientRect(); return r.width > 20 && r.height > 5; };
+    const vis = (e) => laid(e) && e.getClientRects().length > 0 && e.offsetParent !== null;
+    const all = () => [...document.querySelectorAll('div.name')].filter((e) => norm(e).startsWith(want));
+    const scroller = (root) => { let p = root; while (p && p !== document.body) { const cs = getComputedStyle(p); if (/auto|scroll/.test(cs.overflowY) && p.scrollHeight > p.clientHeight + 4) return p; p = p.parentElement; } return null; };
+    let els = all().filter(vis);
+    let usedHidden = false;
+    if (!els.length && all().some(laid)) { els = all().filter(laid); usedHidden = true; }
+    if (!els.length) return JSON.stringify({ ok: false, why: 'not-yet', total: document.querySelectorAll('div.name').length });
+    // el-loading-mask 是 Element Plus 的加载遮罩，盖满整个面板。事件打进它就静默丢失，
+    // 必须先等它消失 —— 实测「点了目录但没切到目标」17 次全是这个原因。
+    for (let i = 0; i < 10; i++) {
+      const m = [...document.querySelectorAll('.el-loading-mask,[class*=loading-mask]')].find((x) => { const s = getComputedStyle(x); return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0.05 && x.getBoundingClientRect().height > 40; });
+      if (!m) break;
+      await new Promise((r) => setTimeout(r, 900));
+    }
+    const e = els[0];
+    const cont = scroller(e.parentElement);
+    if (cont) { const br = cont.getBoundingClientRect(), rr = e.getBoundingClientRect(); cont.scrollTop += rr.top + rr.height / 2 - (br.top + br.height / 2); }
+    else { const rr = e.getBoundingClientRect(); window.scrollBy(0, rr.top + rr.height / 2 - innerHeight / 2); }
+    await new Promise((r) => setTimeout(r, 300));
+    const r = e.getBoundingClientRect();
+    if (r.top < 0 || r.bottom > innerHeight) return JSON.stringify({ ok: false, why: '滚完还是不在视口内', top: Math.round(r.top), bottom: Math.round(r.bottom), vh: innerHeight });
+    const cx = Math.round(r.x + r.width / 2), cy = Math.round(r.y + r.height / 2);
+    const top = document.elementFromPoint(cx, cy);
+    if (!top || !(top === e || e.contains(top) || top.contains(e))) return JSON.stringify({ ok: false, why: '这个坐标上盖着别的元素', hit: top ? top.tagName + '.' + String(top.className).slice(0, 28) : 'null', cx, cy });
+    return JSON.stringify({ ok: true, cx, cy, dup: all().length, shown: els.length, hidden: usedHidden });
+  })()`;
   try {
-    const b = JSON.parse(
-      await evl(
-        `(() => {
-          const want = ('视频：' + ${JSON.stringify(v.name)}).replace(/\\s+/g, '');
-          const all = [...document.querySelectorAll('div.name')];
-          const els = all.filter((e) => (e.textContent || '').replace(/\\s+/g, '').startsWith(want));
-          if (!els.length) return JSON.stringify({ ok: false, why: '目录里没有这个条目', divName: all.length });
-          const e = els[0];
-          e.scrollIntoView({ block: 'center' });
-          const r = e.getBoundingClientRect();
-          if (r.width < 20 || r.height < 5) return JSON.stringify({ ok: false, why: '条目尺寸为 0（面板没展开）', w: Math.round(r.width), h: Math.round(r.height) });
-          if (r.top < 0 || r.bottom > innerHeight) return JSON.stringify({ ok: false, why: '条目不在视口内', top: Math.round(r.top), bottom: Math.round(r.bottom), vh: innerHeight });
-          return JSON.stringify({ ok: true, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
-        })()`
-      )
-    );
+    let b = null;
+    for (let round = 0; round < 6; round++) {
+      b = JSON.parse(await evl(probe));
+      if (b.ok) break;
+      if (b.why !== 'not-yet') break;
+      await sleep(3000);
+    }
     if (!b.ok) {
-      log(`  · 点目录失败：${b.why}${b.w !== undefined ? ` (${b.w}x${b.h})` : ''}${b.top !== undefined ? ` top=${b.top} bottom=${b.bottom} 视口高=${b.vh}` : ''}`);
+      log(`  · 点目录失败：${b.why === 'not-yet' ? `等了 18 秒目录仍未渲染（页面共 ${b.total} 个 div.name）` : b.why}${b.top !== undefined ? ` top=${b.top} bottom=${b.bottom} 视口高=${b.vh}` : ''}${b.hit ? ` 盖住的是 ${b.hit} @(${b.cx},${b.cy})` : ''}`);
       return false;
     }
     for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
-      await send('Input.dispatchMouseEvent', { type, x: b.x, y: b.y, button: type === 'mousePressed' ? 'left' : 'none', clickCount: 1, buttons: type === 'mousePressed' ? 1 : 0 });
+      await send('Input.dispatchMouseEvent', { type, x: b.cx, y: b.cy, button: type === 'mousePressed' ? 'left' : 'none', clickCount: 1, buttons: type === 'mousePressed' ? 1 : 0 });
     }
-    // 目录切换是 SPA 内部改路由，URL 上的 videoId 可能几秒后才跟上，所以轮询到 12 秒
+    // 目录切换是 SPA 内部改路由，URL 上的 videoId 可能几秒后才跟上；
+    // 所以除了认 videoId，也认「播放器换成了目标时长」这个特征，避免 URL 不更新时误判成失败。
     for (let i = 0; i < 6; i++) {
       await sleep(2000);
       const s = await nowPlaying().catch(() => null);
-      if (s && s.vid === v.videoId) return true;
+      if (!s) continue;
+      if (s.vid === v.videoId) return true;
+      if (v.seconds && s.d && Math.abs(s.d - v.seconds) < 3 && s.vid !== v.videoId) {
+        log(`  · 目录切换后播放器时长对上了(${Math.round(s.d)}s≈${v.seconds}s)但 videoId 还没跟上，再等一轮`);
+      }
     }
     const cur = await nowPlaying().catch(() => null);
-    log(`  · 点了目录但没切到目标：期望 ${v.videoId.slice(0, 10)}… 实际 ${cur ? String(cur.vid).slice(0, 10) + '…' : '读不到'} @(${b.x},${b.y})`);
+    log(`  · 点了目录但没切到目标：期望 ${v.videoId.slice(0, 10)}… 实际 ${cur ? String(cur.vid).slice(0, 10) + '…' : '读不到'} @(${b.cx},${b.cy}) 该条目 DOM 里 ${b.dup} 份、可见 ${b.shown} 份`);
     return false;
   } catch (e) {
     log('  · 点目录异常：' + String(e.message).slice(0, 120));
