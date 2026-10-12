@@ -175,9 +175,36 @@ code:502  检测到您有正在进行中的【XX】章节习题，请前往…�
 
 `exercises.mjs` / `answer.mjs` / `export-exercises.mjs` 是这条线上更早的尝试，接口族判断有错，保留作取证痕迹。
 
-## 五、还没解决的问题：程序化播放不计入进度
+## 五、枚举与核验（2026-10-12 补）
 
-## 五、边界
+- **两类课程的取单元接口不一样**。闯关制走 `listCourseBarrier`+`listCatalogBarrier`；
+  非闯关制（如框架程序设计（Java））`listCourseBarrier` 返回 **0 个关卡**，必须回落到
+  `POST study/courseCatalog/tree` 按 `childList` 里 `videoCount>0` 的节点取单元。
+  两个答题脚本都补了这个兜底。**在补之前，Java 的 138 道题对接答逻辑完全不可见**，
+  于是被误读成"这门课没题"。
+- **报数必须说明口径**。`exercisesList` 逐单元累加得到的是*提交槽位*数，不是题目数：
+  Java 累加 276、去重后 138（同一道题被两个单元复用，138×2），而 138 正是 runner 打的
+  「练习清单=138 道」。另外四门课去重后与累加相等。
+- **接口回 200 不等于答案落库**。`--apply` 提交后会重新拉一次 `exercisesList`，
+  数服务端自己的 `submitAnswer`，逐单元打 `已答 before → after（期望 ≥…）`，
+  不达标以退出码 4 结束。
+- 只读盘点器：`node .cdp/inventory.mjs <课程名关键词>`，给单元数、题目数（含去重）、
+  已答、可自动作答、按题型分布，全程不领 `operationId`、不提交。
+- 刷课的取数同理：`listCourseBarrier` 会漏掉没有子节点的顶层关卡（实测整棵树 41 条、
+  关卡接口只给 40 条，缺的是「课程介绍」183 秒），runner 现在用 `progressDetails`
+  权威树补齐，并加了一道 `haveTime/sumTime` 课程级时长闸。
+
+## 六、长任务怎么起
+
+```bash
+powershell -NoProfile -File .cdp/start-queue.ps1        # 脱离会话启动队列
+node .cdp/queue.mjs --dry                               # 只看判定，不启动播放
+powershell -NoProfile -File .cdp/stop-jobs.ps1          # 停
+```
+用 agent 的后台 shell 直接起 `queue.mjs` 会随会话结束被一起清掉（实测跑到一半整条消失，
+连专用 profile 的 Chrome 都不在），所以必须走 `Start-Process`。
+
+## 七、边界
 
 - 编程题要在本人名下提交，需要本人明确点头，工具默认只做预览；`--apply` 是显式开关。
 - 协议勾选一类的同意动作交回本人完成。
