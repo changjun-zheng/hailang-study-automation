@@ -101,9 +101,14 @@ const raw = await evl(`(async()=>{
         rec.submit={code:w.code,written:Array.isArray(w.data)?w.data.length:0,msg:String(w.msg||'').slice(0,40),finalize:f.code,finalizeMsg:String(f.msg||'').slice(0,40)};
         // 接口回 200 不等于答案落库 —— 再取一次题目列表，服务端自己的 submitAnswer 才算数。
         // 必须在 clearStudentUnit 之前读，读完再释放会话。
+        // 回读前必须重新 exerciseBarrier：真人链路里 exercisesList 之前一定先有它，
+        // 少了这一步多数单元会返回空列表 —— 我第一次用这个回读时就把 21 个单元全读成
+        // "已答 0 → 0"，那是量法坏了，不是提交失败。
+        await P('studyRecordExercises/exerciseBarrier',{studentCourseId:sid,unitId:s.unitId});
         const re=await P('studyRecordExercises/exercisesList',{studentCourseId:sid,courseId:course.id,majorId:me.majorId,unitId:s.unitId,version:course.version});
         const rq=Array.isArray(re.data)?re.data:[];
-        rec.verify={before:rec.answered,after:rq.filter(q=>!!q.submitAnswer).length,expect:rec.answered+todo.length,readBack:rq.length};
+        // 读不到题就先别判成败：把状态如实标成 readFailed，避免把"没读到"报告成"没落库"
+        rec.verify={before:rec.answered,after:rq.filter(q=>!!q.submitAnswer).length,expect:rec.answered+todo.length,readBack:rq.length,readFailed:rq.length===0};
       }
     }
     // 每个单元用完必须释放那个「同一时刻只允许一个」的习题会话，否则后面所有单元都会 502
@@ -128,16 +133,18 @@ console.log(`  跳过 ${sum('skip')} 道：${[...new Set(r.units.flatMap((u) => 
 for (const u of r.units.filter((x) => x.submit)) console.log(`  提交 ${u.barrier} / ${u.unitName}: 写入 code=${u.submit.code} 共${u.submit.written}条 ${u.submit.msg} | 交卷 code=${u.submit.finalize} ${u.submit.finalizeMsg}`);
 // 终判只认服务端回读到的 submitAnswer 条数，不认接口返回码。
 const v = r.units.filter((x) => x.verify);
-let mismatch = 0;
+let mismatch = 0, unread = 0;
 for (const u of v) {
+  if (u.verify.readFailed) { unread++; console.log(`  回读 ${u.unitName}: 读不到题目列表（不能据此判定成败）`); continue; }
   const ok = u.verify.after >= u.verify.expect;
   if (!ok) mismatch++;
   console.log(`  回读 ${u.unitName}: 已答 ${u.verify.before} → ${u.verify.after}（期望 ≥${u.verify.expect}）${ok ? '✓' : '✗ 服务端没记下'}`);
 }
 if (v.length) {
-  const done = v.reduce((a, u) => a + (u.verify.after - u.verify.before), 0);
-  console.log(`\n本轮实际落库 ${done} 道（按服务端回读统计，覆盖 ${v.length} 个单元）`);
+  const done = v.reduce((a, u) => a + (u.verify.readFailed ? 0 : u.verify.after - u.verify.before), 0);
+  console.log(`\n本轮确认落库 ${done} 道（可回读的 ${v.length - unread} 个单元）${unread ? `；另有 ${unread} 个单元读不到题目，未纳入判定` : ''}`);
 }
+if (unread) console.log('! 有单元回读为空。这只代表"没读到"，不代表"没提交成功"——用 .cdp/inventory.mjs 独立复核，别据此下结论');
 if (!APPLY) console.log('\n（只读统计，没有提交任何东西。加 --apply 才写）');
 ws.close();
 process.exit(mismatch ? 4 : 0);
