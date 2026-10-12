@@ -158,7 +158,7 @@ async function postJson(url, body) {
   );
 }
 
-const prof = JSON.parse(await evl(`JSON.stringify((()=>{const u=JSON.parse(localStorage.getItem('userInfo2')||'{}');return {id:u.id||'',majorId:u.majorId||''}})())`));
+const prof = JSON.parse(await evl(`JSON.stringify((()=>{const u=JSON.parse(localStorage.getItem('userInfo2')||'{}');return {id:u.id||'',majorId:u.majorId||'',studyNumber:u.studyNumber||u.id||''}})())`));
 const me = prof.id;
 const majorId = prof.majorId;
 const courses = await postJson('/gateway/frequent/orgStudent/pagedMyCourse', {
@@ -193,6 +193,19 @@ const save = () => fs.writeFileSync(STATE, JSON.stringify(state, null, 1));
 async function videosOf(barrierId) {
   const r = await getJson(`/gateway/system/orgStudent/listCatalogBarrier?barrierId=${barrierId}&studentCourseId=${course.studentCourseId}`);
   return (r.data || []).filter((n) => n.videoId).map((n) => ({ unitId: n.id, videoId: n.videoId, name: n.catalogName || '', seconds: n.timeLength || 0, videoStatus: n.studyVideoStatus }));
+}
+// 权威枚举：学习页自己用的就是 progressDetails，它给的是一整棵目录树。
+// listCourseBarrier 会漏掉「课程介绍」这种没有子节点的顶层关卡 —— 实测整棵树 41 条、关卡接口只给 40 条，
+// 于是终态门看着"40/40 全绿"就宣布课程完成，而那 183 秒的视频从来没被播过（记录全为 null）。
+async function progressVideos() {
+  const r = await getJson(`/gateway/system/orgStudent/progressDetails?studentId=${prof.studyNumber}&id=${course.id}&majorId=${majorId}&studentCourseId=${course.studentCourseId}&version=${course.version}`);
+  const out = [];
+  const walk = (n) => {
+    for (const v of n.courseCatalogVideoVos || []) out.push({ unitId: v.unitId || n.id, videoId: v.id, name: v.name || '', seconds: v.timeLength || 0, videoStatus: v.studyVideoStatus });
+    for (const c of n.children || []) walk(c);
+  };
+  (Array.isArray(r.data) ? r.data : []).forEach(walk);
+  return out;
 }
 // 练习清单：myExercises 把题目和 referenceAnswer 一起下发（平台自己给答案，不是破解来的）
 async function exercisesOf() {
@@ -716,11 +729,35 @@ for (const b of bList) {
 // 守护进程据此收工，剩下三分之二的课再没人播。
 const allServer = [];
 for (const b of bList) allServer.push(...(await videosOf(b.id)));
+
+// 补播关卡接口没覆盖到的条目。放在终态判据之前：这一轮就能把它播掉，而不是等下一轮。
+const covered = new Set(allServer.map((v) => v.videoId));
+const tree = await progressVideos();
+const extra = tree.filter((v) => v.videoId && !covered.has(v.videoId));
+if (extra.length) {
+  log(`权威目录树 ${tree.length} 条，关卡接口只覆盖 ${covered.size} 条 → 补播 ${extra.length} 条：${extra.map((v) => v.name).join('、')}`);
+  await watchBarrier(extra);
+} else if (tree.length && tree.length !== covered.size) {
+  log(`! 树里 ${tree.length} 条、关卡覆盖 ${covered.size} 条，但差集为空（应为同一条目的不同表示）`);
+}
+
 const notDone = allServer.filter((v) => v.videoStatus !== 2);
 if (notDone.length) {
   notDone.forEach((v) => delete state.done[v.videoId]);
   save();
   log(`✗ 服务端仍有 ${notDone.length}/${allServer.length} 条未记为完成（例：${notDone.slice(0, 3).map((v) => v.name).join('、')}）→ 已退回本地标记，以退出码 3 让守护再来一轮`);
+  ws.close();
+  process.exit(3);
+}
+// 最后一道闸：课程级时长。只看 allServer 全绿就收工，会被"关卡接口少给一条"打穿 ——
+// 实测带着 08:17:18/08:20:21 的缺口报了「服务端确认 40 条视频全部已完成」并以 0 退出。
+// 允许 2 秒以内的差，避免平台侧取整造成永远对不齐、守护无限重跑。
+const toSec = (t) => String(t || '0:0:0').split(':').reduce((a, p) => a * 60 + (parseInt(p, 10) || 0), 0);
+const courseDet = await getJson(`/gateway/system/orgStudent/myCourseDetails?studentId=${prof.studyNumber}&id=${course.id}&majorId=${majorId}&studentCourseId=${course.studentCourseId}&version=${course.version}`);
+const cd = courseDet.data || {};
+const gap = toSec(cd.sumTime) - toSec(cd.haveTime);
+if (cd.sumTime && gap > 2) {
+  log(`✗ 课程时长 ${cd.haveTime}/${cd.sumTime}，还差 ${gap} 秒（关卡覆盖 ${covered.size}/${tree.length} 条）→ 退出码 3 让守护再补一轮`);
   ws.close();
   process.exit(3);
 }
@@ -730,6 +767,6 @@ if (ANSWER) {
 } else {
   log('（没加 --answer，本轮只刷视频不做题）');
 }
-log(`结束。服务端确认 ${allServer.length} 条视频全部已完成`);
+log(`结束。服务端确认 ${covered.size + extra.length} 条视频已完成，课程时长 ${cd.haveTime}/${cd.sumTime}${gap > 0 ? '（差 ' + gap + ' 秒，在容差内）' : ''}`);
 ws.close();
 process.exit(0);
