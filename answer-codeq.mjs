@@ -90,17 +90,24 @@ const projDirOf = (qid) => {
   return files.length >= 3 ? { dir: d, files } : null;
 };
 
+// 他 2026-10-12 的决定：只交平台自己给了答案的编程题。
+// 我手写的 2 个 Vue3 工程属于"以他名义提交我写的代码"，要显式加 --with-authored 才启用。
+const WITH_AUTHORED = process.argv.includes('--with-authored');
 const picked = ONLY ? list.rows.filter((r) => (r.unitName || '').includes(ONLY)) : list.rows;
-console.log(`课程「${list.course}」编程题 ${picked.length} 道`);
+console.log(`课程「${list.course}」编程题 ${picked.length} 道${WITH_AUTHORED ? '（含手写工程）' : '（只交平台有答案的，手写工程需 --with-authored）'}`);
 const todo = [];
+let authoredSkipped = 0;
 for (const r of picked) {
   const code = toCode(r.ref);
   const real = isRealCode(code);
-  const proj = real ? null : projDirOf(r.qid);
-  const how = real ? `${code.length} 字节代码` : proj ? `本地手写工程 ${proj.files.length} 个文件` : '平台没给代码（只给了说明文字）';
+  const proj = real ? null : (WITH_AUTHORED ? projDirOf(r.qid) : null);
+  const how = real ? `${code.length} 字节代码` : proj ? `本地手写工程 ${proj.files.length} 个文件`
+    : (projDirOf(r.qid) ? '有手写工程但未启用（加 --with-authored）' : '平台没给代码（只给了说明文字）');
+  if (!real && projDirOf(r.qid) && !proj) authoredSkipped++;
   console.log(`  ${real || proj ? '·' : '✗'} ${String(r.unitName).slice(0, 30).padEnd(32)} ${how}${r.answered ? ' 已作答' : ''}`);
   if ((real || proj) && !r.answered) todo.push({ ...r, code, proj });
 }
+if (authoredSkipped) console.log(`\n（${authoredSkipped} 道按你的要求跳过：答案是我手写的工程，不是平台给的答案）`);
 if (!todo.length) { console.log('\n没有可做的编程题'); process.exit(0); }
 if (!APPLY) { console.log(`\n（dry-run：${todo.length} 道可以做，但没有上传也没有提交。加 --apply 才真做）`); process.exit(0); }
 
