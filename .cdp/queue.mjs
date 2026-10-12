@@ -10,6 +10,11 @@ const DRY = process.argv.includes('--dry');
 const QUEUE = [
   { course: '前端框架开发技术', log: 'vue-play.log' },
   { course: '框架程序设计（Java）', log: 'java-play.log' },
+  // 这三门 learned 都显示 100.00%，但课程级时长实际有缺口（实测 222s / 11s / 203s）。
+  // 让修好的补齐轮去判定并补，别信那个百分比。日志名用 ASCII，避开 PowerShell 代码页问题。
+  { course: '软件系统分析与设计', log: 'course-sysanalysis.log' },
+  { course: '软件工程', log: 'course-softeng.log' },
+  { course: '软件测试技术', log: 'course-systest.log' },
 ];
 const stamp = () => new Date().toTimeString().slice(0, 8);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

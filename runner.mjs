@@ -760,9 +760,16 @@ const courseDet = await getJson(`/gateway/system/orgStudent/myCourseDetails?stud
 const cd = courseDet.data || {};
 const gap = toSec(cd.sumTime) - toSec(cd.haveTime);
 if (cd.sumTime && gap > 2) {
-  log(`✗ 课程时长 ${cd.haveTime}/${cd.sumTime}，还差 ${gap} 秒（关卡覆盖 ${covered.size}/${tree.length} 条）→ 退出码 3 让守护再补一轮`);
-  ws.close();
-  process.exit(3);
+  // 只有"确实还有能播的东西"才退回下一轮。像 软件工程 那样只差 11 秒、而权威树里也没有
+  // 未覆盖的单元时，exit 3 只会让守护空烧到重启上限。
+  // 走到这里说明关卡视频已全部 status=2（notDone 分支已在前面 exit 3），
+  // 所以唯一还能动的就是本轮刚补播的那批。
+  if (extra.length > 0) {
+    log(`✗ 课程时长 ${cd.haveTime}/${cd.sumTime}，还差 ${gap} 秒（本轮补播了 ${extra.length} 条，可能还没落库）→ 退出码 3 让守护再补一轮`);
+    ws.close();
+    process.exit(3);
+  }
+  log(`! 课程时长 ${cd.haveTime}/${cd.sumTime} 差 ${gap} 秒，但关卡全部 status=2、权威树也没有未覆盖单元 —— 这缺口不归因于"漏播"，报出来收工，不让守护空烧`);
 }
 if (ANSWER) {
   log('全部视频已记账，开始做客观题');
