@@ -85,6 +85,11 @@ const raw = await evl(`(async()=>{
         const w=await P('studyRecordExercises/createExercisesList',body);
         const f=await P('studyRecordExercises/createList',body);   // 「提交练习」
         rec.submit={code:w.code,written:Array.isArray(w.data)?w.data.length:0,msg:String(w.msg||'').slice(0,40),finalize:f.code,finalizeMsg:String(f.msg||'').slice(0,40)};
+        // 接口回 200 不等于答案落库 —— 再取一次题目列表，服务端自己的 submitAnswer 才算数。
+        // 必须在 clearStudentUnit 之前读，读完再释放会话。
+        const re=await P('studyRecordExercises/exercisesList',{studentCourseId:sid,courseId:course.id,majorId:me.majorId,unitId:s.unitId,version:course.version});
+        const rq=Array.isArray(re.data)?re.data:[];
+        rec.verify={before:rec.answered,after:rq.filter(q=>!!q.submitAnswer).length,expect:rec.answered+todo.length,readBack:rq.length};
       }
     }
     // 每个单元用完必须释放那个「同一时刻只允许一个」的习题会话，否则后面所有单元都会 502
@@ -104,5 +109,18 @@ console.log(`  已答 ${sum('answered')} 道`);
 console.log(`  可提交（客观题 + 参考答案与选项双证一致 + 未答过）${sum('canDo')} 道`);
 console.log(`  跳过 ${sum('skip')} 道：${[...new Set(r.units.flatMap((u) => u.skipTypes))].join('、') || '无'} —— 主观题/需要写代码或画图，不代做`);
 for (const u of r.units.filter((x) => x.submit)) console.log(`  提交 ${u.barrier} / ${u.unitName}: 写入 code=${u.submit.code} 共${u.submit.written}条 ${u.submit.msg} | 交卷 code=${u.submit.finalize} ${u.submit.finalizeMsg}`);
+// 终判只认服务端回读到的 submitAnswer 条数，不认接口返回码。
+const v = r.units.filter((x) => x.verify);
+let mismatch = 0;
+for (const u of v) {
+  const ok = u.verify.after >= u.verify.expect;
+  if (!ok) mismatch++;
+  console.log(`  回读 ${u.unitName}: 已答 ${u.verify.before} → ${u.verify.after}（期望 ≥${u.verify.expect}）${ok ? '✓' : '✗ 服务端没记下'}`);
+}
+if (v.length) {
+  const done = v.reduce((a, u) => a + (u.verify.after - u.verify.before), 0);
+  console.log(`\n本轮实际落库 ${done} 道（按服务端回读统计，覆盖 ${v.length} 个单元）`);
+}
 if (!APPLY) console.log('\n（只读统计，没有提交任何东西。加 --apply 才写）');
-ws.close(); process.exit(0);
+ws.close();
+process.exit(mismatch ? 4 : 0);

@@ -253,9 +253,12 @@ async function runAnswerScript(extraArgs) {
     p.stdout.on('data', (d) => { buf += d; });
     p.stderr.on('data', (d) => { buf += d; });
     p.on('exit', (code) => {
-      const lines = buf.split(String.fromCharCode(10)).filter((l) => /课程「|已答|可提交|跳过 |提交 /.test(l));
+      const lines = buf.split(String.fromCharCode(10)).filter((l) => /课程「|已答|可提交|跳过 |提交 |回读 |落库 /.test(l));
       for (const l of lines) log('  [答题] ' + l.trim());
       if (!lines.length) log('  [答题] 没有可报告的输出（exit ' + code + '）：' + buf.replace(/\s+/g, ' ').slice(0, 160));
+      // exit 4 = 接口回了 200 但服务端回读没数到那条答案，必须显式喊出来，
+      // 否则这条会被"提交 code=200"的日志盖过去、当成成功收工。
+      if (code === 4) log('  [答题] ! 有单元回读不达标，见上面标 ✗ 的行');
       res(code);
     });
   });
