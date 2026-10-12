@@ -22,7 +22,7 @@ const ONLY = arg('--unit', '');
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import { buildZip } from './zip-store.mjs';
 
 const ps = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.url && t.type === 'page');
 const page = ps.find((t) => t.url.includes('study.cqie.edu.cn'));
@@ -72,30 +72,45 @@ const toCode = (html) => String(html || '')
   .replace(/[ \t]+$/gm, '').trim();
 const isRealCode = (c) => (c.match(/<(html|head|body|div|script|template|style)[\s>]/gi) || []).length >= 2 && c.length > 120;
 
+// 平台只给一句「涉及多个页面，见视频和讲义」的题，答案得自己写。
+// 手写工程放 .cdp/codeq/proj/<题目id>/ 下（整个 Vue 工程），存在就按多文件工程打包。
+const ROOT = import.meta.dirname;
+const PROJ_ROOT = path.join(ROOT, '.cdp', 'codeq', 'proj');
+const projDirOf = (qid) => {
+  const d = path.join(PROJ_ROOT, qid);
+  if (!fs.existsSync(d)) return null;
+  const files = [];
+  const walk = (p, rel) => {
+    for (const e of fs.readdirSync(p, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(path.join(p, e.name), rel + e.name + '/');
+      else files.push(rel + e.name);
+    }
+  };
+  walk(d, '');
+  return files.length >= 3 ? { dir: d, files } : null;
+};
+
 const picked = ONLY ? list.rows.filter((r) => (r.unitName || '').includes(ONLY)) : list.rows;
 console.log(`课程「${list.course}」编程题 ${picked.length} 道`);
 const todo = [];
 for (const r of picked) {
   const code = toCode(r.ref);
   const real = isRealCode(code);
-  console.log(`  ${real ? '·' : '✗'} ${String(r.unitName).slice(0, 30).padEnd(32)} ${real ? code.length + ' 字节代码' : '平台没给代码（只给了说明文字）'}${r.answered ? ' 已作答' : ''}`);
-  if (real && !r.answered) todo.push({ ...r, code });
+  const proj = real ? null : projDirOf(r.qid);
+  const how = real ? `${code.length} 字节代码` : proj ? `本地手写工程 ${proj.files.length} 个文件` : '平台没给代码（只给了说明文字）';
+  console.log(`  ${real || proj ? '·' : '✗'} ${String(r.unitName).slice(0, 30).padEnd(32)} ${how}${r.answered ? ' 已作答' : ''}`);
+  if ((real || proj) && !r.answered) todo.push({ ...r, code, proj });
 }
 if (!todo.length) { console.log('\n没有可做的编程题'); process.exit(0); }
 if (!APPLY) { console.log(`\n（dry-run：${todo.length} 道可以做，但没有上传也没有提交。加 --apply 才真做）`); process.exit(0); }
 
-// 3) 打包成 zip（Windows 自带 Compress-Archive，不引第三方依赖）
-const { execFileSync } = await import('node:child_process');
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hailang-codeq-'));
+// 3) 打成 zip（自己写 STORE 包，条目名保证正斜杠）
 const results = [];
 for (const q of todo) {
-  const dir = path.join(tmp, q.qid);
-  fs.mkdirSync(dir, { recursive: true });
-  const ext = /\.vue$/i.test(q.unitName) ? 'html' : 'html';
-  fs.writeFileSync(path.join(dir, 'index.' + ext), q.code, 'utf8');
-  const zip = path.join(tmp, q.qid + '.zip');
-  execFileSync('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path ${JSON.stringify(path.join(dir, '*'))} -DestinationPath ${JSON.stringify(zip)} -Force`]);
-  const bytes = fs.readFileSync(zip);
+  const entries = q.proj
+    ? q.proj.files.map((rel) => ({ name: rel, data: fs.readFileSync(path.join(q.proj.dir, rel)) }))
+    : [{ name: 'index.html', data: q.code }];
+  const bytes = buildZip(entries);
   // 4) 上传
   const up = JSON.parse(await evl(`(async()=>{
     const t=localStorage.getItem('token2');
@@ -126,7 +141,6 @@ for (const q of todo) {
   console.log(`  提交 ${q.unitName}: oid=${sub.oid} 写入 code=${sub.write.code} ${sub.write.msg} | 交卷 code=${sub.fin.code} ${sub.fin.msg}`);
   results.push({ q: q.unitName, ok: sub.write.code === 200, detail: sub });
 }
-fs.rmSync(tmp, { recursive: true, force: true });
 const good = results.filter((r) => r.ok).length;
 console.log(`\n完成 ${good}/${results.length} 道编程题`);
 process.exit(0);
