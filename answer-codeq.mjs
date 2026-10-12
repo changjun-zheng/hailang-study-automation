@@ -52,6 +52,13 @@ const list = JSON.parse(await evl(`(async()=>{
   const units=[];
   for(const b of bs.data||[]){const ns=await G('/gateway/system/orgStudent/listCatalogBarrier?barrierId='+b.id+'&studentCourseId='+sid);
     for(const n of ns.data||[]) if(n.videoId&&!units.some(x=>x.unitId===n.id)) units.push({unitId:n.id,name:n.catalogName,videoId:n.videoId})}
+  // 非闯关制课程 listCourseBarrier 返空，只走上面这条路会一道编程题都枚举不到（Java 课实测 0 个关卡）。
+  // 回落到学习页用的目录树，按 childList 里 videoCount>0 的节点取单元。
+  if(!units.length){
+    const tree=await P('courseCatalog/tree',{courseId:c.id});
+    const walkNodes=(n)=>{ for(const x of (n.childList||[])){ if((x.videoCount||0)>0&&!units.some(u=>u.unitId===x.id)) units.push({unitId:x.id,name:x.name||x.sortName,videoId:null}); walkNodes(x); } };
+    walkNodes(tree.data||{});
+  }
   const out=[];
   for(const s of units){
     await P('studyRecordExercises/exerciseBarrier',{studentCourseId:sid,unitId:s.unitId});
