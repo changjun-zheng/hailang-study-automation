@@ -42,10 +42,24 @@ const raw = await evl(`(async()=>{
   const sid=course.studentCourseId||course.id;
   const bs=await G('/gateway/system/orgStudent/listCourseBarrier?courseId='+course.id+'&majorId='+me.majorId+'&userId='+me.id+'&version='+course.version+'&studentCourseId='+sid);
   if(bs.code!==200) return JSON.stringify({err:'关卡列表 code='+bs.code+' '+(bs.msg||'')+'（会话可能被别处登录顶掉了）'});
-  const units=[];
+  const units=[]; let enumMode='barrier';
   for(const b of (bs.data||[]).slice().sort((x,y)=>(x.sortCode||0)-(y.sortCode||0))){
     const ns=await G('/gateway/system/orgStudent/listCatalogBarrier?barrierId='+b.id+'&studentCourseId='+sid);
     for(const n of ns.data||[]) if(n.videoId&&!units.some(x=>x.unitId===n.id)&&(!${JSON.stringify('')}||true)) units.push({barrier:b.name,unitId:n.id,unitName:n.catalogName,videoId:n.videoId});
+  }
+  // 非闯关制课程 listCourseBarrier 返回的是空数组，上面这条路一个单元都枚举不到。
+  // 框架程序设计（Java）就是这种课：runner 打出「关卡数=0」却又打出「练习清单=138 道」，
+  // 所以早先"Java 课 0 道练习"的结论是枚举缺口的假象，不是课程真的没题。
+  if(!units.length){
+    const tree=await P('courseCatalog/tree',{courseId:course.id});
+    const walkNodes=(n,parentName)=>{
+      for(const c of (n.childList||[])){
+        if((c.videoCount||0)>0&&!units.some(x=>x.unitId===c.id)) units.push({barrier:parentName||'',unitId:c.id,unitName:c.name||c.sortName||String(c.id),videoId:null});
+        walkNodes(c,c.name||parentName);
+      }
+    };
+    walkNodes(tree.data||{},'');
+    if(units.length) enumMode='catalogTree';
   }
   const picked=${JSON.stringify(ONLY)}?units.filter(u=>(u.unitName||'').includes(${JSON.stringify(ONLY)})):units;
   const out=[];
@@ -96,12 +110,15 @@ const raw = await evl(`(async()=>{
     await P('studyRecordExercises/clearStudentUnit',{studentCourseId:sid,unitId:s.unitId});
     out.push(rec);
   }
-  return JSON.stringify({course:course.name,units:out})
+  return JSON.stringify({course:course.name,enumMode,units:out})
 })()`);
 const r = JSON.parse(raw);
 if (r.err) { console.error(r.err); process.exit(1); }
 const sum = (k) => r.units.reduce((a, u) => a + u[k], 0);
 console.log(`扫了 ${r.units.length} 个单元（含空），逐个：`);
+// 「一门课 0 道题」有两种成因：课程确实没题，或我的枚举没覆盖到。以前不分这两种，
+// 于是把非闯关制课程（关卡接口返空）读成了"没题"。扫到 0 个单元时必须把这句喊出来。
+console.log(`  枚举方式=${r.enumMode}${r.units.length === 0 ? '  ← 关卡接口返空、目录树也没枚举到节点："0 道题"这个结论不可信，先查枚举再下结论' : ''}`);
 for (const u of r.units) console.log(`  ${String(u.unitName).slice(0, 26).padEnd(28)} 题=${u.total}${u.raw ? '  ' + u.raw : ''}`);
 const withQ = r.units.filter((u) => u.total > 0);
 console.log(`\n课程「${r.course}」：${withQ.length} 个单元有习题，共 ${sum('total')} 道`);
