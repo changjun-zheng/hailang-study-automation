@@ -1,3 +1,4 @@
+param([string]$Url = 'https://study.cqie.edu.cn/login')
 $chrome = "C:\Users\ME\AppData\Local\Google\Chrome\Application\chrome.exe"
 $profile = "C:\Users\ME\.hailang-chrome-profile"
 $args = @(
@@ -13,7 +14,7 @@ $args = @(
   '--autoplay-policy=no-user-gesture-required',
   '--window-position=120,80',
   '--window-size=1200,860',
-  'https://study.cqie.edu.cn/login'
+  $Url
 )
 Start-Process -FilePath $chrome -ArgumentList $args
 Start-Sleep -Seconds 5
