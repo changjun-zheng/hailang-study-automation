@@ -34,15 +34,21 @@ const send = (m, p = {}) => new Promise((res, rej) => { const id = ++seq; pend.s
 const evl = async (e) => { const r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) return 'EXC ' + String(r.exceptionDetails.exception?.description || '').slice(0, 150); return r.result?.value; };
 await send('Page.enable'); await send('Runtime.enable');
 
-// 窗口必须可见：minimized → document.hidden → Chrome 推迟媒体加载（duration=null、readyState=0）
-async function assertVisible() {
+// 窗口处理：只解决"minimized → document.hidden → Chrome 推迟媒体加载"，
+// 绝不把窗口提到前台（setWindowBounds normal 会抢焦点，实测反复打扰用户工作）。
+// 做法：需要时才还原，随后立刻把窗口挪到屏幕外 —— 对 Chrome 而言仍是可见状态，
+// 但用户看不到它，也不会被切走焦点。
+async function parkWindow() {
   const { windowId } = await bask('Browser.getWindowForTarget', { targetId: tab.id });
   const b = await bask('Browser.getWindowBounds', { windowId });
-  if (b.bounds.windowState !== 'normal') await bask('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
-  const after = await bask('Browser.getWindowBounds', { windowId });
+  if (b.bounds.windowState !== 'normal') {
+    await bask('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+  }
+  await bask('Browser.setWindowBounds', { windowId, bounds: { left: -32000, top: 0, width: 1280, height: 800, windowState: 'normal' } });
   const hidden = await evl('document.hidden');
-  return { state: after.bounds.windowState, hidden };
+  return { hidden };
 }
+const assertVisible = async () => parkWindow();
 
 const gapsOf = async () => JSON.parse(await evl(`(async()=>{
   const t=localStorage.getItem('token2');const H={Authorization:t,'Content-Type':'application/json'};
@@ -63,7 +69,7 @@ const gapsOf = async () => JSON.parse(await evl(`(async()=>{
 })()`));
 
 const st = await assertVisible();
-console.log(`窗口状态=${st.state} document.hidden=${st.hidden}${st.hidden ? '  ← 媒体会被推迟，先把窗口置前' : ''}`);
+console.log(`窗口已挪到屏幕外（不抢焦点），document.hidden=${st.hidden}${st.hidden ? '  ← 媒体会被推迟，需换 headless 或置前一次' : ''}`);
 let info = await gapsOf();
 if (info.err) { console.error(info.err); process.exit(1); }
 console.log(`课程「${info.course}」 有分段缺口的视频 ${info.gaps.length} 条`);
@@ -93,6 +99,8 @@ for (const g of info.gaps) {
   let last = -1, same = 0;
   for (let i = 0; i < 200; i++) {
     await sleep(6000);
+    // 播放器会在我们 seek/重启后把倍速重置回去，所以每轮都重新按一次 2x
+    await evl('(()=>{const v=document.querySelector("video");try{v.playbackRate=2}catch(e){}return 1})()');
     const s = await evl('(()=>{const v=document.querySelector("video");return JSON.stringify([v?v.currentTime:-1,v?v.ended:false,v?!v.paused:false])})()');
     const [pos, ended, playing] = JSON.parse(String(s));
     if (ended) { console.log(`  ✓ 播到片尾 ${pos.toFixed(0)}s`); break; }
