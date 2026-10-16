@@ -17,5 +17,13 @@ exercises-*.json
 # 还原出来的编程题参考答案（平台下发的原题答案，不入库）
 .cdp/codeq/
 
+# 设计题产物上传后平台返回的 fileId 缓存（跟账号绑定，不入库）
+.cdp/design/
+
+# 设计题交付产物：代码自己绘制的 UML 图，画面里没有姓名学号，是交付物本体，放行
+!design-output/**/*.png
+# 但工程构建产物仍然不入库
+design-output/**/target/
+
 node_modules/
 .DS_Store

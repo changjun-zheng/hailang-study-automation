@@ -1,0 +1,49 @@
+（1）Maven 工程创建过程
+IDEA 菜单 File → New → Project，左侧模板选 Maven，勾选 Create from archetype 并选 org.apache.maven.archetypes:maven-archetype-quickstart，Next 后填 GroupId=com.example、ArtifactId=convert-score、Version=1.0-SNAPSHOT，点 Create 并选 Open in Current Window，等右下角 Importing 'Maven projects' 把依赖下完。File → Project Structure → Project 里 SDK 选 JDK 21、Language level 选 21，Modules 里确认 src/main/java 是 Sources（蓝）、src/test/java 是 Tests（绿）。改完 pom.xml 后点右上角刷新图标 Reload Maven Project。
+
+（2）ConvertScore 类代码
+package com.example;
+
+public class ConvertScore {
+    public String hundredToGrade(int score) throws Exception {
+        if (score > 100 || score < 0) {
+            throw new Exception("输入成绩无效！");
+        }
+        if (score >= 85) {
+            return "A";
+        } else if (score < 85 && score >= 70) {
+            return "B";
+        } else if (score < 70 && score >= 60) {
+            return "C";
+        } else {
+            return "D";
+        }
+    }
+}
+
+（3）测试方法代码与运行结果说明
+package com.example;
+
+import org.junit.jupiter.api.Test;
+
+public class AppTest {
+    @Test
+    void testConvert() {
+        int score = 90;
+        ConvertScore convertScore = new ConvertScore();
+        try {
+            String ret = convertScore.hundredToGrade(score);
+            System.out.println("考试成绩为：" + score + "分，等级成绩为：" + ret);
+            score = 65;
+            ret = convertScore.hundredToGrade(score);
+            System.out.println("考试成绩为：" + score + "分，等级成绩为：" + ret);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+
+pom.xml 引入 org.junit.jupiter:junit-jupiter:5.11.4（scope=test）与 maven-surefire-plugin:3.2.5，跑 test 生命周期。运行结果：surefire 自动识别 JUnit Platform provider，执行 com.example.AppTest 一个测试方法，控制台按顺序打印「考试成绩为：90分，等级成绩为：A」「考试成绩为：65分，等级成绩为：C」，报告行是 Tests run: 1, Failures: 0, Errors: 0, Skipped: 0，构建结果 BUILD SUCCESS，说明 90 分落在 ≥85 的 A 档、65 分落在 60≤x<70 的 C 档，分档逻辑与题目要求一致。另用 App.main() 逐条验了 95/85/84/70/69/60/59/0 八个点，输出 A A B B C C D D，两处边界（85 归 A、70 归 B、60 归 C）均正确。
+
+（4）附件说明
+convert-score.zip 内含完整工程（pom.xml、ConvertScore.java、App.java、AppTest.java）以及 mvn-test.txt（mvn -B clean test 的原始输出）、app-run.txt（App.main 运行输出）、surefire-AppTest.txt（surefire 落盘的测试报告）。按题目「将创建过程截图提交」的要求，这里用上述真实运行输出与工程文件代替界面截图。
