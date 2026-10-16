@@ -22,6 +22,7 @@ const ONLY = arg('--unit', '');
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { buildZip } from './zip-store.mjs';
 
 const ps = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.url && t.type === 'page');
@@ -125,7 +126,13 @@ for (const q of todo) {
     ? q.proj.files.map((rel) => ({ name: rel, data: fs.readFileSync(path.join(q.proj.dir, rel)) }))
     : [{ name: 'index.html', data: q.code }];
   const bytes = buildZip(entries);
-  // 4) 上传
+  // 4) 上传（按内容哈希缓存 fileId：提交失败重跑时不再往账号上堆孤儿压缩包）
+  const CACHE = path.join(ROOT, '.cdp', 'codeq', 'upload-cache.json');
+  let cache = {}; try { cache = JSON.parse(fs.readFileSync(CACHE, 'utf8')); } catch {}
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  let fileId = cache[hash] && cache[hash].id;
+  if (fileId) { console.log(`  复用已上传产物 ${q.unitName}: fileId=${String(fileId).slice(0, 12)}…`); }
+  else {
   const up = JSON.parse(await evl(`(async()=>{
     const t=localStorage.getItem('token2');
     const b64=${JSON.stringify(bytes.toString('base64'))};
@@ -135,26 +142,41 @@ for (const q of todo) {
     const r=await fetch('/gateway/file/studyRecordExercises/uploadCodeZip',{method:'POST',headers:{Authorization:t},body:fd});
     return await r.text()
   })()`));
-  const fileId = up && up.data && (up.data.id || up.data.fileName);
+  fileId = up && up.data && (up.data.id || up.data.fileName);
   console.log(`  上传 ${q.unitName}: code=${up.code} fileId=${fileId}`);
-  if (!fileId) { results.push({ q: q.unitName, ok: false, why: '上传失败 ' + JSON.stringify(up).slice(0, 80) }); continue; }
+  if (fileId) { cache[hash] = { id: fileId, at: new Date().toISOString(), qid: q.qid }; fs.mkdirSync(path.dirname(CACHE), { recursive: true }); fs.writeFileSync(CACHE, JSON.stringify(cache, null, 1)); }
+  }
+  if (!fileId) { results.push({ q: q.unitName, ok: false, why: '上传失败 ' + (cache[hash] ? '' : '无 fileId') }); continue; }
   // 5) 领 operationId 并提交成绩
   const sub = JSON.parse(await evl(`(async()=>{
     const t=localStorage.getItem('token2');const H={Authorization:t,'Content-Type':'application/json'};
     const me=JSON.parse(localStorage.getItem('userInfo2')||'{}');
     const P=(x,b)=>fetch('/gateway/study/'+x,{method:'POST',headers:H,body:JSON.stringify(b)}).then(r=>r.json()).catch(e=>({err:String(e)}));
+    // 提交前必须重新进入这个单元的练习会话：读取阶段末尾调过 clearStudentUnit，
+    // 少了这两步服务端会判「当前练习题状态已发生变化，请从练习列表中重新进入」（实测 9/9 全被拒）。
+    await P('studyRecordExercises/exerciseBarrier',{studentCourseId:'${list.sid}',unitId:'${q.unitId}'});
+    const l0=await P('studyRecordExercises/exercisesList',{studentCourseId:'${list.sid}',courseId:'${list.cid}',majorId:me.majorId,unitId:'${q.unitId}',version:'${list.version}'});
     const ck=await P('courseCatalogExercisesConfig/checkUpdateExercises',{studentCourseId:'${list.sid}',courseId:'${list.cid}',majorId:me.majorId,unitId:'${q.unitId}',version:'${list.version}'});
     const oid=(ck.data&&(ck.data.operationId||ck.data.id))||'';
     const body={poList:[{exercisesId:'${q.qid}',questionType:7,submitAnswer:'[]',submitFile:${JSON.stringify(String(fileId))},referenceAnswer:'',recordId:null,updateCount:0}],
       operationId:oid,studentCourseId:'${list.sid}',unitId:'${q.unitId}',courseId:'${list.cid}'};
     const w=await P('studyRecordExercises/createExercisesList',body);
     const f=await P('studyRecordExercises/createList',body);
+    // 回读要在释放会话之前，且以服务端自己的 submitAnswer/submitFile 为准。
+    // 交卷（createList）之后会话已终结，必须重新进入才能读到，否则 find 不到这道题 ——
+    // 上一版就是因此报出 answered=false / submitFile=null，那其实是「没读到」不是「没写进去」。
+    await P('studyRecordExercises/exerciseBarrier',{studentCourseId:'${list.sid}',unitId:'${q.unitId}'});
+    const l1=await P('studyRecordExercises/exercisesList',{studentCourseId:'${list.sid}',courseId:'${list.cid}',majorId:me.majorId,unitId:'${q.unitId}',version:'${list.version}'});
+    const q1=(Array.isArray(l1.data)?l1.data:[]).find(x=>String(x.id)===String('${q.qid}'));
+    const rb={found:!!q1,n:(Array.isArray(l1.data)?l1.data.length:0),answered:!!(q1&&q1.submitAnswer),file:q1?String(q1.submitFile||'').slice(0,28):null};
     await P('studyRecordExercises/clearStudentUnit',{studentCourseId:'${list.sid}',unitId:'${q.unitId}'});
-    return JSON.stringify({oid:oid.slice(0,8),write:{code:w.code,msg:String(w.msg||'').slice(0,50)},fin:{code:f.code,msg:String(f.msg||'').slice(0,50)}})
+    return JSON.stringify({oid:oid.slice(0,8),write:{code:w.code,msg:String(w.msg||'').replace(/\s+/g,' ').slice(0,200)},fin:{code:f.code,msg:String(f.msg||'').replace(/\s+/g,' ').slice(0,120)},readBack:rb})
   })()`));
-  console.log(`  提交 ${q.unitName}: oid=${sub.oid} 写入 code=${sub.write.code} ${sub.write.msg} | 交卷 code=${sub.fin.code} ${sub.fin.msg}`);
-  results.push({ q: q.unitName, ok: sub.write.code === 200, detail: sub });
+  console.log(`  提交 ${q.unitName}: oid=${sub.oid} 写入 code=${sub.write.code} ${sub.write.msg} | 交卷 code=${sub.fin.code} ${sub.fin.msg} | 回读 命中=${sub.readBack.found}(读${sub.readBack.n}题) 已答=${sub.readBack.answered} submitFile=${sub.readBack.file}`);
+  // 成败以服务端回读为准；但"没读到题"要单独成档，不能混报成"没写进去"
+  results.push({ q: q.unitName, ok: !!(sub.readBack.found && sub.readBack.answered), unread: !sub.readBack.found, detail: sub });
 }
 const good = results.filter((r) => r.ok).length;
-console.log(`\n完成 ${good}/${results.length} 道编程题`);
-process.exit(0);
+const unread = results.filter((r) => r.unread).length;
+console.log(`\n服务端确认落库 ${good}/${results.length} 道编程题${unread ? `；另有 ${unread} 道回读没命中题目（状态未知，既不算成功也不算失败）` : ''}`);
+process.exit(good + unread < results.length ? 4 : 0);
