@@ -85,8 +85,15 @@ const raw = await evl(`(async()=>{
         if(q.questionType===1) verifiable=right.length===1&&norm(right)===norm(q.referenceAnswer);
         else if(q.questionType===2) verifiable=right.length>1&&norm(right)===norm(q.referenceAnswer);
         else if(q.questionType===3) verifiable=/^[01]$/.test(String(q.referenceAnswer==null?'':q.referenceAnswer).trim());
-        // 主观题：只有显式 --subjective 才纳入，且要求平台确实下发了非空文字答案
-        else if(${JSON.stringify(SUBJECTIVE)}&&(q.questionType===5||q.questionType===6)) verifiable=String(q.referenceAnswer||'').replace(/<[^>]+>/g,'').trim().length>0;
+        // 主观题：只有显式 --subjective 才纳入。
+        // 题型 8（设计题）的评分标准多是"将某类代码/配置内容提交"，答案就是文本，所以也要放行；
+        // 但必须先过占位检测 —— 平台对部分设计题只下发"具体过程参见讲义内容"/"（1）（2）"这类话术，
+        // 那种不是答案，搬过去等于交白卷（实测 14 道设计题里 3 道是占位、11 道有 344~7045 字符真答案）。
+        else if(${JSON.stringify(SUBJECTIVE)}&&(q.questionType===5||q.questionType===6||q.questionType===8)){
+          const txt=String(q.referenceAnswer||'').replace(/<[^>]+>/g,'').replace(/&[a-z]+;/g,' ').trim();
+          const placeholder=/^(具体过程参见|具体内容请见|见学习视频|见视频和讲义|参见讲义|略)$|^[（(][0-9]+[)）]{0,1}$/.test(txt)||txt.length<20;
+          verifiable=!placeholder;
+        }
         return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable};
       });
       const todo=items.filter(i=>!i.answered&&i.verifiable);
