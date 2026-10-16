@@ -65,7 +65,9 @@ const list = JSON.parse(await evl(`(async()=>{
     await P('studyRecordExercises/exerciseBarrier',{studentCourseId:sid,unitId:s.unitId});
     const l=await P('studyRecordExercises/exercisesList',{studentCourseId:sid,courseId:c.id,majorId:me.majorId,unitId:s.unitId,version:c.version});
     for(const q of (Array.isArray(l.data)?l.data:[])) if(q.questionType===7)
-      out.push({unitId:s.unitId,unitName:s.name,qid:q.id,ref:q.referenceAnswer||'',answered:!!q.submitAnswer&&q.submitAnswer!=='[]',submitFile:q.submitFile||null});
+      // 编程题的"已作答"标记是 submitFile，不是 submitAnswer —— 提交时 submitAnswer 恒为 '[]'，
+      // 用 !!submitAnswer 判会把空答案当成已答（实测把 7 报成 9）。
+      out.push({unitId:s.unitId,unitName:s.name,qid:q.id,ref:q.referenceAnswer||'',answered:!!q.submitFile,submitFile:q.submitFile||null});
     await P('studyRecordExercises/clearStudentUnit',{studentCourseId:sid,unitId:s.unitId});
   }
   return JSON.stringify({ok:true,course:c.name,cid:c.id,sid,me:{id:me.id,majorId:me.majorId},version:c.version,rows:out})
@@ -168,7 +170,7 @@ for (const q of todo) {
     await P('studyRecordExercises/exerciseBarrier',{studentCourseId:'${list.sid}',unitId:'${q.unitId}'});
     const l1=await P('studyRecordExercises/exercisesList',{studentCourseId:'${list.sid}',courseId:'${list.cid}',majorId:me.majorId,unitId:'${q.unitId}',version:'${list.version}'});
     const q1=(Array.isArray(l1.data)?l1.data:[]).find(x=>String(x.id)===String('${q.qid}'));
-    const rb={found:!!q1,n:(Array.isArray(l1.data)?l1.data.length:0),answered:!!(q1&&q1.submitAnswer),file:q1?String(q1.submitFile||'').slice(0,28):null};
+    const rb={found:!!q1,n:(Array.isArray(l1.data)?l1.data.length:0),answered:!!(q1&&q1.submitFile),file:q1?String(q1.submitFile||'').slice(0,28):null,sameFile:!!(q1&&String(q1.submitFile||'')===String('${JSON.stringify(String(fileId)).slice(1, -1)}'))};
     await P('studyRecordExercises/clearStudentUnit',{studentCourseId:'${list.sid}',unitId:'${q.unitId}'});
     return JSON.stringify({oid:oid.slice(0,8),write:{code:w.code,msg:String(w.msg||'').replace(/\s+/g,' ').slice(0,200)},fin:{code:f.code,msg:String(f.msg||'').replace(/\s+/g,' ').slice(0,120)},readBack:rb})
   })()`));
