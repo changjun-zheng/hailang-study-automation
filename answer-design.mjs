@@ -74,7 +74,7 @@ const list = JSON.parse(await evl(`(async()=>{
         if(q.questionType!==8) continue;
         const sa=String(q.submitAnswer||'').trim();
         if(sa&&sa!=='[]') continue;
-        rows.push({course:c.name,cid:c.id,sid,ver,majorId:me.majorId,unitId:s.unitId,unitName:s.name,qid:q.id,score:q.questionScore});
+        rows.push({course:c.name,cid:c.id,sid,ver,majorId:me.majorId,unitId:s.unitId,unitName:s.name,qid:q.id,score:q.questionScore,recordId:q.recordId||null});
       }
       await P('studyRecordExercises/clearStudentUnit',{studentCourseId:sid,unitId:s.unitId});
     }
@@ -151,7 +151,8 @@ for (const q of todo) {
     await P('studyRecordExercises/exercisesList',{studentCourseId:sid,courseId:cid,majorId:me.majorId,unitId:uid,version:ver});
     const ck=await P('courseCatalogExercisesConfig/checkUpdateExercises',{studentCourseId:sid,courseId:cid,majorId:me.majorId,unitId:uid,version:ver});
     const oid=(ck.data&&(ck.data.operationId||ck.data.id))||'';
-    const body={poList:[{exercisesId:qid,questionType:8,submitAnswer:ans,submitFile:${JSON.stringify(fid)},referenceAnswer:'',recordId:null,updateCount:0}],
+    // recordId 带上服务端已有记录的 id，否则旧的无附件记录会遮住新写入（编程题实测踩过）
+    const body={poList:[{exercisesId:qid,questionType:8,submitAnswer:ans,submitFile:${JSON.stringify(fid)},referenceAnswer:'',recordId:${JSON.stringify(q.recordId || null)},updateCount:0}],
       operationId:oid,studentCourseId:sid,unitId:uid,courseId:cid};
     const w=await P('studyRecordExercises/createExercisesList',body);
     const f=await P('studyRecordExercises/createList',body);
