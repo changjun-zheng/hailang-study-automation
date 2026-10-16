@@ -19,6 +19,17 @@ const QUEUE = [
 const stamp = () => new Date().toTimeString().slice(0, 8);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 队列日志必须自己追加写。start-queue.ps1 用 Start-Process -RedirectStandardOutput 重定向，
+// 那是覆盖写：每重起一次队列，上一轮的证据就没了（实测 Java 跑完之后的几行全丢，
+// 导致无法判断三门课究竟跑到哪）。console.log 现在同时进终端和追加进 queue.log。
+const LOG_FILE = path.join(ROOT, 'queue.log');
+const origLog = console.log.bind(console);
+console.log = (...a) => {
+  const s = a.join(' ');
+  origLog(s);
+  try { fs.appendFileSync(LOG_FILE, s + String.fromCharCode(10)); } catch {}
+};
+
 // 「活着没」和「跑成功没」是两个独立信号，不能共用一个判据。
 // 旧实现只看日志末行是否为收尾行：进程被杀/崩溃时末行不是收尾行，于是被判成"还在跑"，
 // 队列就永远停在那儿等一个已经死掉的课程 —— 2026-10-12 实测到 Java 课因此一直没起来。
