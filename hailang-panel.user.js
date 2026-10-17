@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.2.0
+// @version      0.3.0
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切标签不中断，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -11,6 +11,14 @@
 // ==/UserScript==
 
 /*
+ * v0.3.0 补三条：勾选不再被刷新冲掉、完成状态改从关卡接口取、时长每 60 秒自取。
+ *
+ * 已判掉的问题（真人点一次之后会自己续上吗？）：会。
+ *   实测 同学A账号，只点了一次播放键，此后 构建Vue的应用实例-2 播完、站点自己顺播到
+ *   存储和显示Vue的数据-1 并继续播，期间窗口还被最小化过一次；
+ *   心跳累计从 39 涨到 81，服务端 haveTime 从 00:13:27 涨到 00:32:38（+1151 秒）。
+ *   所以面板的定位是「你点一下起播，剩下它管」，不是「全自动」。
+ *
  * v0.2.0 对着七条反馈改：
  *   ① 勾选多门课 → 排队，一次只刷一门，当前那门标「正在刷」，刷完自动进下一门
  *      （站点是单会话，开两个窗口只会互相顶号，所以只能串行）
@@ -33,7 +41,7 @@
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.2.0' };
+  window.__kgPanel = { version: '0.3.0' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -301,14 +309,14 @@
           <button id="kg-scan" style="flex:1;cursor:pointer">刷新课程与缺口</button>
           <button id="kg-play" style="flex:1;cursor:pointer">继续起播</button>
         </div>
-        <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">分工：排队跳转、2 倍速、静音、切标签不中断都由面板做；<b>起播那一下要你亲手点播放键</b> —— 实测脚本代点时视频在播但服务端时长涨 0，站点的播放器只认真人手势。</div>
+        <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">分工：排队跳转、2 倍速、静音、切标签不中断都由面板做；<b>起播那一下要你亲手点播放键</b> —— 实测脚本代点时心跳一次都不发（真人点一次累计到 81 次），站点的播放器只认真人手势。点过一次之后顺播与记账会自己续上。</div>
         <div id="kg-courses" style="margin:6px 0;border-top:1px dashed #e2e8f0;padding-top:6px"></div>
         <div style="display:flex;gap:6px">
           <button id="kg-run" style="flex:1;cursor:pointer;background:#16a34a;color:#fff;border:0;padding:7px;border-radius:6px">开始刷勾选的课程（排队）</button>
           <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳累计 <span id="kg-beat">0</span> · 监控会话 <span id="kg-mon">0</span> · 面板 v0.2.0</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳累计 <span id="kg-beat">0</span> · 监控会话 <span id="kg-mon">0</span> · 面板 v0.3.0</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
@@ -321,13 +329,25 @@
     };
     p.querySelector('#kg-scan').onclick = () => { say('扫描中…'); scan(); };
     p.querySelector('#kg-play').onclick = playNow;
-    p.querySelector('#kg-run').onclick = startQueue;
+    p.querySelector('#kg-run').onclick = () => {
+      // 同一份勾选重复点「开始」不再重排一遍（实测连点三次会留三条一样的队列日志）
+      const ids = pickQueue().map((x) => x.id).join(',');
+      const job = loadJob();
+      if (job && job.queue.map((x) => x.id).join(',') === ids) { say('队列没变，继续跑当前这门；要换课先点「停」'); return; }
+      startQueue();
+    };
     p.querySelector('#kg-stop').onclick = () => { clearJob(); G.running = false; say('已清空任务队列（不影响平台已记的账）'); renderCourses(); };
     setInterval(() => {
       const a = document.getElementById('kg-beat'), b = document.getElementById('kg-mon');
       if (a) a.textContent = G.beats;
       if (b) b.textContent = G.monitor;
     }, 1000);
+    // 每 60 秒悄悄把每门课的时长重取一遍：上一版只在点「刷新」时才更新，
+    // 实测播了 19 分钟面板还停在旧数字，用户以为没在记账。
+    setInterval(() => {
+      if (!G.list.length) return;
+      Promise.all(G.list.map((c) => courseDetails(c).catch(() => { }))).then(renderCourses);
+    }, 60000);
     setInterval(renderCourses, 8000);
     const job = loadJob();
     if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，点「继续起播」接着走`); }
