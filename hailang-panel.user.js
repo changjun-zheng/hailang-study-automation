@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.4.1
+// @version      0.4.3
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切窗口/切标签被停会自动接手，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -11,6 +11,18 @@
 // ==/UserScript==
 
 /*
+ * v0.4.3 把 v0.4.2 那条"跳回视频页"真正接通：列表页上面板体被藏掉了，
+ *   而常驻注入器又只在学习页注入 —— 结果人停在 /MyCourse/Paged 时既看不到面板也等不到注入，
+ *   实测卡 140 秒不动。现在只要还在 /stu/ 下就显示面板，注入器也改成认整个站点。
+ *
+ * v0.4.2 修「点绿按钮没反应、也不知道有没有在刷」。两条根因：
+ *   ① 站点是 SPA：从视频页点进课程列表页，URL 变了但脚本不会重跑，加载时算好的 STUDY 过期了。
+ *      于是面板在列表页上照常显示课程与队列，可页面上根本没有 <video>，自动起播的看门狗永远不触发。
+ *   ② 点「开始」时队列 id 和已有任务相同就直接 return（防重复排队那条），
+ *      结果"该跳转"的情况也被一起挡掉 —— 他连点九下，日志刷了九条「队列没变」。
+ *   现在：需要看页面的判断一律重新读 location（onStudy()）；有任务但这一页没视频 → 自己跳回待播那条；
+ *   按钮文案分成三态（正在播 第x/y条 / 停着呢点我 / 不在视频页正在跳回去），不再用"正在刷"糊人。
+ *
  * v0.4.1 对着他两条新反馈改：
  *   ① 片尾弹「知识点：… 有习题：(2题) 待完成」会卡住播放 —— 面板现在每 3 秒查一次可见弹窗，
  *      点它的关闭按钮（绝不点「去练习」，那会跳去做题），并且到片尾**自己跳下一条**，
@@ -61,19 +73,22 @@
  *   ⑥ 切到别的标签再切回来不再暂停（伪装可见性 + 只补真被切走时的那次暂停）
  *   ⑦ 判「有没有记账」不数请求 —— 直接比服务端 haveTime，请求节奏是我猜的，时长是它自己认的账
  *
- * 播放内核与 hailang-background-play.user.js 同源（那套逻辑是 CDP 通道实测出来的），
- * 差别在于这里没有可信输入：起播必须挂在「用户点面板按钮」这一次真实手势的调用栈里。
- * 所以面板不承诺"全自动"，它承诺"你点一下开始，剩下它自己走"。
+ * 播放内核与 hailang-background-play.user.js 同源（那套逻辑是 CDP 通道实测出来的）。
+ * 起播那一下在 v0.4.0 之前写成"必须挂在用户真实手势上"，那是错的（见上面 v0.4.0 段）：
+ * 打在真正会被点到的元素上的合成手势就够，站点服务端照样记账。
  */
 (() => {
   'use strict';
 
   const STUDY = /\/stu\/pages\/MyCourse\/Study/.test(location.pathname);
+  // 站点是 SPA：从视频页点进课程列表页时 URL 变了，但脚本不会重跑，所以 STUDY 会过期。
+  // 凡是判断"现在这一页到底是什么页"的地方，都要重新读 location，别用加载时算好的常量。
+  const onStudy = () => /\/stu\/pages\/MyCourse\/Study/.test(location.pathname);
   const JOB_KEY = 'kg-job';
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.4.1' };
+  window.__kgPanel = { version: '0.4.3' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -388,7 +403,9 @@
     const target = vids.find((v) => v.id === todo[0].id);
     const url = `https://study.cqie.edu.cn/stu/pages/MyCourse/Study?id=${c.id}&studentCourseId=${c.sid}&version=${c.ver}&courseUnitId=${target.unitId}&majorId=${who().majorId}&videoId=${target.id}`;
     say(`  打开「${target.name}」，页面刷新后面板自己起播（不用你点）`);
-    if (STUDY) location.href = url; else { G.pendingUrl = url; say('  （这条要在学习页上跑，请手动进任一视频页）'); }
+    // 整页跳转在任何页面都能到目标 URL，不再拿"加载时是不是学习页"当门槛（SPA 会让那个判断过期）
+    G.lastNav = Date.now();
+    location.href = url;
   }
 
   // ---------- 手动起播（面板自己也会定时调 fireGesture，见 UI 里的自动起播开关） ----------
@@ -486,7 +503,7 @@
     p.style.cssText = 'position:fixed;right:14px;bottom:14px;width:352px;max-height:74vh;overflow:auto;z-index:2147483000;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 6px 24px rgba(15,23,42,.16);font:13px/1.5 -apple-system,"Microsoft YaHei",sans-serif;color:#0f172a';
     p.innerHTML = `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#1e3a8a;color:#fff;position:sticky;top:0">
-        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.4.1</span></b>
+        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.4.3</span></b>
         <button id="kg-sound" title="静音 / 微声保活 / 开 三态循环：要挂后台请选微声保活" style="cursor:pointer;font-size:11px">声音：静音</button>
         <button id="kg-min" style="cursor:pointer">—</button>
       </div>
@@ -504,11 +521,13 @@
           <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.4.1</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.4.3</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
-    if (!STUDY) { jb.style.display = 'none'; }
+    // 只要还在 /stu/ 下就显示：课程列表页上同样要看队列、也要能自己跳回视频页。
+    // 之前按"是不是学习页"藏掉整个面板体，人在列表页就以为面板坏了。
+    if (!/^\/stu\//.test(location.pathname)) { jb.style.display = 'none'; }
     p.querySelector('#kg-min').onclick = () => { jb.style.display = jb.style.display === 'none' ? '' : 'none'; };
     p.querySelector('#kg-sound').onclick = (e) => {
       const i = MODES.map((m) => m[0]).indexOf(G.mode);
@@ -523,13 +542,19 @@
       G.autoStart = e.target.checked;
       say(G.autoStart ? '已开自动起播：视频停着且不是你亲手停的，面板自己发起播手势' : '已关自动起播：只在你点「立即起播」或亲手点播放键时起播');
     };
-    p.querySelector('#kg-run').onclick = () => {
-      // 橙色等待态下点它，只该告诉他这一步得自己来，不该回一句跟当前情境无关的「队列没变」
+    p.querySelector('#kg-run').onclick = async () => {
+      const job = loadJob();
+      // 有任务但这一页没视频 → 这一发就是"跳回去播"，不是回一句无关的「队列没变」
+      if (job && !document.querySelector('video')) {
+        G.lastNav = Date.now();
+        say('  手动跳回待播条目（这一页没有视频）');
+        await openNext();
+        return;
+      }
       if (G.waiting) { playNow(); return; }
       // 同一份勾选重复点「开始」不再重排一遍（实测连点三次会留三条一样的队列日志）
       const ids = pickQueue().map((x) => x.id).join(',');
-      const job = loadJob();
-      if (job && job.queue.map((x) => x.id).join(',') === ids) { say('队列没变，继续跑当前这门；要换课先点「停」'); return; }
+      if (job && job.queue.map((x) => x.id).join(',') === ids) { say('队列没变，这门课正在播；要换课先点「停」'); return; }
       startQueue();
     };
     p.querySelector('#kg-stop').onclick = () => { clearJob(); G.running = false; say('已清空任务队列（不影响平台已记的账）'); renderCourses(); };
@@ -558,6 +583,18 @@
       const v = document.querySelector('video');
       const dlg = dismissDialog();
       if (dlg) say(`  有弹窗挡着，已点它的关闭按钮：「${dlg}」`);
+      // 有任务、但这一页根本没有视频（人在课程列表页，或 SPA 把人带走了）→ 自己跳回待播那条。
+      // 上一版漏了这条：按钮写着「正在刷」，实际什么都没播，用户点九下也没反应。
+      if (job && !v) {
+        if (Date.now() - (G.lastNav || 0) > 60000) {
+          G.lastNav = Date.now();
+          say('  这一页没有视频（不在学习页），跳回当前这门课的待播条目');
+          await openNext();
+        }
+        btn.textContent = '▶ 不在视频页：正在跳回去播…';
+        btn.style.background = '#d97706';
+        return;
+      }
       const atEnd = !!(job && v && v.duration && v.currentTime >= v.duration - 1.5);
       if (atEnd && !G.navigating) { G.navigating = 1; await nextInCourse(); return; }
       // 有任务、视频停着、而且不是他亲手停的 → 面板自己发起播手势（v0.4.1：实测这样服务端就记账）。
@@ -567,14 +604,17 @@
         G.lastFire = Date.now();
         say(`  自动起播：手势打在「${fireGesture()}」上`);
       }
-      G.waiting = stuck && !G.autoStart;
-      btn.textContent = G.waiting ? '▶ 停着呢：点我起播（或你亲手点播放键）'
-        : (job && G.cur ? `正在刷：${G.cur.name.slice(0, 10)}（改勾选要先点「停」）` : '开始刷勾选的课程（排队）');
-      btn.style.background = G.waiting ? '#d97706' : '#16a34a';
+      G.waiting = stuck;
+      const nowVid = new URLSearchParams(location.search).get('videoId');
+      const idx = job && Array.isArray(job.todo) ? job.todo.findIndex((x) => x.id === nowVid) : -1;
+      btn.textContent = !job ? '开始刷勾选的课程（排队）'
+        : stuck ? '▶ 停着呢：点我起播（或你亲手点播放键）'
+        : `正在播 ${(G.cur ? G.cur.name.slice(0, 10) : '')}${idx >= 0 ? ` 第 ${idx + 1}/${job.todo.length} 条` : ''}（改勾选先点「停」）`;
+      btn.style.background = stuck ? '#d97706' : '#16a34a';
     }, 3000);
     const job = loadJob();
     if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，面板会自己起播接着走`); }
-    say('面板 v0.4.1 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
+    say('面板 v0.4.3 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
     scan();
   }
 

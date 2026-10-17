@@ -33,9 +33,12 @@ const unlock = () => { try { if (String(fs.readFileSync(LOCK, 'utf8')).trim() ==
 process.on('exit', unlock);
 
 async function page() {
-  const tabs = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page' && (t.url || '').includes('/MyCourse/Study'));
+  // 任何 study.cqie.edu.cn 页面都要注入：面板现在在课程列表页上也会自己跳回待播条目，
+  // 只认 /MyCourse/Study 的话，人一旦停在列表页就永远等不到注入（实测卡了 140 秒）
+  const tabs = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page' && (t.url || '').includes('study.cqie.edu.cn'));
   if (!tabs.length) return null;
-  const ws = new WebSocket(tabs[0].webSocketDebuggerUrl);
+  const pick = tabs.find((t) => t.url.includes('/MyCourse/Study')) || tabs[0];
+  const ws = new WebSocket(pick.webSocketDebuggerUrl);
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
   let seq = 0; const pend = new Map();
   ws.onmessage = (e) => { const x = JSON.parse(e.data); if (x.id && pend.has(x.id)) { const p = pend.get(x.id); pend.delete(x.id); x.error ? p.rej(new Error(x.error.message)) : p.res(x.result); } };
@@ -83,11 +86,15 @@ while ((Date.now() - t0) / 3600000 < MAX_HOURS) {
   miss = 0;
   try {
     if (!DRY) {
+      // 版本每轮重读：上一版把 VER 在启动时读死，工作区改了脚本它就不认，永远注入旧版本
+      const src = fs.readFileSync(SRC, 'utf8');
+      const want = (src.match(/@version\s+(\S+)/) || [])[1];
       const has = String(await p.evl('(()=>String((window.__kgPanel||{}).version||"none"))()'));
-      if (has !== VER) {
+      if (want && has !== want) {
         await p.evl(`(()=>{window.__kgBuilt=1;window.__kgPanel=null;const e=document.getElementById('kg-panel');if(e)e.remove();return 1})()`);
-        await p.evl(fs.readFileSync(SRC, 'utf8') + '\n;"ok"');
-        L(`注入面板 v${VER}（上一个版本 ${has}）`);
+        await p.evl(src + '\n;"ok"');
+        VER = want;
+        L(`注入面板 v${want}（上一个版本 ${has}）`);
       }
       if (!started) {
         const st = await p.J(`JSON.stringify((()=>{const G=window.__kgPanel&&window.__kgPanel.G;return{n:G?G.list.length:-1}})())`);
