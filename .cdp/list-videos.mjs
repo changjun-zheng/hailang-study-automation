@@ -8,7 +8,8 @@ const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w
 const CID = process.argv[2] || 'e8716aab5bc18a56b115d3303f43555c';
 const SC = process.argv[3] || '2c235454cef7b898bd11e77ad2b0d20c';
 const MID = process.argv[4] || '9f07cf1e06d0a57957bd6be34efd3930';
-const STATE = path.join(ROOT, '.runner-state.json');
+import { latestStateFile } from '../state-path.mjs';
+const STATE = latestStateFile(ROOT) || path.join(ROOT, '.runner-state.json');
 
 const pages = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page');
 const page = pages.find((t) => t.url.includes('study.cqie.edu.cn'));
@@ -24,7 +25,7 @@ ws.close();
 
 const data = JSON.parse(raw || 'null');
 if (!data) { console.error('progressDetails 没数据'); process.exit(1); }
-const local = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+const local = fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : { done: {}, exercises: {} };
 const doneKeys = new Set(Object.keys(local.done || {}));
 const sec = (x) => { const s = String(x ?? ''); return s.includes(':') ? s.split(':').reduce((a, b) => a * 60 + Number(b), 0) : Number(s) || 0; };
 

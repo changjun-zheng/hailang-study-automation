@@ -1,11 +1,14 @@
 // 海浪智学 · 课程自动播放 runner
-// 用法：node runner.mjs [--course 软件系统分析与设计] [--dry] [--barrier 关卡名]
-// 依赖：本机已起 9224 调试 Chrome 且该 profile 已登录（取证工具在 .cdp/）
-const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
+// 用法：node runner.mjs [--course 软件系统分析与设计] [--dry] [--barrier 关卡名] [--cdp http://127.0.0.1:9225]
+// 进度状态按学号分文件（.runner-state-<学号>.json），换账号不会串「已看过」记录；
+// 要把换账号之前的旧 .runner-state.json 收编给当前登录的账号，加 --adopt-state 跑一次。
+// 依赖：本机已起带 --remote-debugging-port 的 Chrome 且该 profile 已登录（取证工具在 .cdp/）
+const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const fs = await import('node:fs');
 const path = await import('node:path');
 const os = await import('node:os');
 const { spawn } = await import('node:child_process');
+const { stateFileFor } = await import('./state-path.mjs');
 
 const arg = (n, d) => {
   const i = process.argv.indexOf(n);
@@ -23,7 +26,10 @@ const ANSWER_ONLY = has('--answer-only');
 // 答题默认只统计不提交；必须再显式给 --apply 才往账号里写答案
 const APPLY_ANSWER = has('--apply');
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w:)/, '$1'));
-const STATE = path.join(ROOT, '.runner-state.json');
+// 状态文件按学号分（见 state-path.mjs）：跑第二个账号时不能复用第一个账号的「已看过」记录。
+// 具体用哪一份要等连上页面拿到学号才知道，所以这里只留旧路径当收编来源。
+const STATE_LEGACY = path.join(ROOT, '.runner-state.json');
+let STATE = null;
 // HAILANG_RATE 用来临时改注入脚本的默认倍速（验「服务端是不是只认实时观看」时设成 1）；不设就是脚本里的 2。
 const PLAYERSRC = (process.env.HAILANG_RATE ? `self.__kgRate=${Number(process.env.HAILANG_RATE)};` : '') + fs.readFileSync(path.join(ROOT, 'hailang-background-play.user.js'), 'utf8');
 
@@ -161,6 +167,18 @@ async function postJson(url, body) {
 const prof = JSON.parse(await evl(`JSON.stringify((()=>{const u=JSON.parse(localStorage.getItem('userInfo2')||'{}');return {id:u.id||'',majorId:u.majorId||'',studyNumber:u.studyNumber||u.id||''}})())`));
 const me = prof.id;
 const majorId = prof.majorId;
+STATE = stateFileFor(ROOT, prof.studyNumber);
+if (has('--adopt-state')) {
+  // 显式收编：只有你确认「这份旧状态就是当前登录账号跑出来的」时才搬，脚本自己不猜
+  if (!fs.existsSync(STATE_LEGACY)) { console.error(`--adopt-state：没有 ${path.basename(STATE_LEGACY)} 可以收编`); process.exit(1); }
+  if (fs.existsSync(STATE)) { console.error(`--adopt-state：${path.basename(STATE)} 已存在，不覆盖（要重来就删掉它或先改名）`); process.exit(1); }
+  fs.copyFileSync(STATE_LEGACY, STATE);
+  log(`已把 ${path.basename(STATE_LEGACY)} 收编为 ${path.basename(STATE)}，共 ${Object.keys(JSON.parse(fs.readFileSync(STATE, 'utf8')).done || {}).length} 条完成记录（旧文件原样保留）`);
+} else if (!fs.existsSync(STATE) && fs.existsSync(STATE_LEGACY)) {
+  log(`! 账号 ${prof.studyNumber} 还没有自己的状态文件，本次从零开始记录。`);
+  log(`! 如果 ${path.basename(STATE_LEGACY)} 其实就是这个账号跑出来的，加 --adopt-state 收编它，否则会白重播一遍`);
+}
+log(`账号=${prof.studyNumber} 状态文件=${path.basename(STATE)}`);
 const courses = await postJson('/gateway/frequent/orgStudent/pagedMyCourse', {
   filters: { courseNature: null, name: '', schoolYear: '', studentId: me, term: '', courseFlag: 0 },
   pageIndex: 1,

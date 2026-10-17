@@ -5,11 +5,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w:)/, '$1'), '..');
-const STATE = path.join(ROOT, '.runner-state.json');
+import { latestStateFile } from '../state-path.mjs';
+const STATE = latestStateFile(ROOT) || path.join(ROOT, '.runner-state.json');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const doneCount = () => {
   try {
-    return Object.keys(JSON.parse(fs.readFileSync(STATE, 'utf8')).done || {}).length;
+    return fs.existsSync(STATE) ? Object.keys(JSON.parse(fs.readFileSync(STATE, 'utf8')).done || {}).length : 0;
   } catch (e) {
     return 0;
   }
