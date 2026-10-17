@@ -12,9 +12,9 @@
 // 不带它 createExercisesList 会返回 code:501「操作ID不能为空」。这个 501 不是平台故障。
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
-// 默认不看「答没答过」，整门课重做一遍（分发出去时不能假设账号是干净的）；
-// 只想补没做的题，加 --only-unanswered。
-const REDO = !process.argv.includes('--only-unanswered');
+// 默认只补没做过的题（重做已答题不会让服务端计数变大，纯花时间）；
+// 不信任这个账号的数据、要整门课重做时加 --redo-all。
+const REDO = process.argv.includes('--redo-all');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '前端框架开发技术');
 const ONLY = arg('--unit', '');   // 只处理单元名包含它的单元，用来做小范围验证

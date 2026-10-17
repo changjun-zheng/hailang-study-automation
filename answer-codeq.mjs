@@ -16,8 +16,8 @@
 // 一律跳过并如实报告。
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
-// 默认连已作答的编程题一起重做（不信任账号已有进度）；只补漏的加 --only-unanswered
-const REDO = !process.argv.includes('--only-unanswered');
+// 默认只补没交过的编程题；不信任账号已有进度、要连附件一起重交时加 --redo-all
+const REDO = process.argv.includes('--redo-all');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '前端框架开发技术');
 const ONLY = arg('--unit', '');

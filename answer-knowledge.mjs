@@ -21,8 +21,8 @@ const argv = process.argv.slice(2);
 const arg = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : ''; };
 const COURSE = arg('--course') || '前端框架开发技术';
 const APPLY = argv.includes('--apply');
-// 默认整段重做，不信任账号上已有的作答记录；只补漏的加 --only-unanswered
-const REDO = !argv.includes('--only-unanswered');
+// 默认只补没做过的；不信任账号已有记录、要整段重做时加 --redo-all
+const REDO = argv.includes('--redo-all');
 const LIMIT = Number(arg('--limit') || 0);
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w:)/, '$1'), '..');

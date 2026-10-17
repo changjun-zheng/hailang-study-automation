@@ -1,8 +1,10 @@
 // 海浪智学 · 课程自动播放 runner
 // 用法：node runner.mjs [--course 软件系统分析与设计] [--dry] [--barrier 关卡名] [--cdp http://127.0.0.1:9225]
+// 默认只做没完成的：服务端标 videoStatus==2 的视频直接跳过，剩下的靠课程级时长门与补齐轮兜底。
+// --from-zero 连自己记的续跑账也不认；--redo-all 连服务端标记也不认、整门课重播。
 // 进度状态按学号分文件（.runner-state-<学号>.json），换账号不会串「已看过」记录；
 // 要把换账号之前的旧 .runner-state.json 收编给当前登录的账号，加 --adopt-state 跑一次。
-// 依赖：本机已起带 --remote-debugging-port 的 Chrome 且该 profile 已登录（取证工具在 .cdp/）
+// 依赖：没在监听会自己新开一个可见 Chrome（独立 profile），你在里面登录后它自动接着跑
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const fs = await import('node:fs');
 const path = await import('node:path');
@@ -25,6 +27,9 @@ const ANSWER = has('--answer');
 const ANSWER_ONLY = has('--answer-only');
 // 答题默认只统计不提交；必须再显式给 --apply 才往账号里写答案
 const APPLY_ANSWER = has('--apply');
+// --redo-all：连服务端已经记为完成的视频也重播一遍（配合 --answer --apply 就是整门课重做）。
+// 默认不是这样：默认只补没完成的，省下的都是几小时的白挂。
+const REDO_ALL = has('--redo-all');
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w:)/, '$1'));
 // 状态文件按学号分（见 state-path.mjs）：跑第二个账号时不能复用第一个账号的「已看过」记录。
 // 具体用哪一份要等连上页面拿到学号才知道，所以这里只留旧路径当收编来源。
@@ -219,10 +224,12 @@ if (ANSWER_ONLY) {
 }
 
 
-// 状态文件是这个账号自己的「已播完」流水账，只用来断点续跑；平台侧的进度一律不信任。
-// 想连自己记的这份也不算、整门课重播一遍，加 --from-zero。
-const state = (fs.existsSync(STATE) && !has('--from-zero')) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : { done: {}, exercises: {} };
-if (has('--from-zero')) log('--from-zero：忽略本账号已记录的完成项，整门课重播一遍');
+// 状态文件是这个账号自己的「已播完」流水账，只用来断点续跑。
+// 默认还要再看服务端自己的完成标记（videoStatus==2），所以一个只看过一半的账号不会被重播一遍；
+// --from-zero 连自己记的账也不认（但仍信服务端标记），--redo-all 两个都不信、整门课重播。
+const state = (fs.existsSync(STATE) && !(REDO_ALL || has('--from-zero'))) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : { done: {}, exercises: {} };
+if (REDO_ALL) log('--redo-all：服务端已完成的视频也重播一遍');
+else if (has('--from-zero')) log('--from-zero：忽略本账号已记录的完成项（服务端标记仍然生效）');
 const save = () => fs.writeFileSync(STATE, JSON.stringify(state, null, 1));
 
 // 一个关卡下的视频清单（接口返回扁平数组：id=课程单元id）
@@ -504,7 +511,9 @@ const markDone = (v, secs) => {
 // 一个关卡内：信任播放器的自动顺播，只在当前这条不在待办里时才主动导航
 async function watchBarrier(vids) {
   const todo = new Map();
-  vids.filter((v) => !state.done[v.videoId]).forEach((v) => todo.set(v.videoId, v));
+  // 服务端标 videoStatus==2 的就是它自己认账的那一层，默认跳过；--redo-all 才重播。
+  // 跳过不等于信任到底：末尾还有课程级时长门与补齐轮，learned 百分比骗人的那种缺口照样会被抓出来。
+  vids.filter((v) => !state.done[v.videoId] && (REDO_ALL || v.videoStatus !== 2)).forEach((v) => todo.set(v.videoId, v));
   if (!todo.size) {
     log('  本关卡视频已全部完成');
     return;
