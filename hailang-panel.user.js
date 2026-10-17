@@ -149,6 +149,10 @@
   const loadJob = () => { try { return JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch (e) { return null; } };
   const saveJob = (j) => localStorage.setItem(JOB_KEY, JSON.stringify(j));
   const clearJob = () => localStorage.removeItem(JOB_KEY);
+  // 勾选也要存：上一版每次渲染都按"有没有缺口"重画勾，用户自己勾的课会被冲掉
+  const SEL_KEY = 'kg-sel';
+  const loadSel = () => { try { return JSON.parse(localStorage.getItem(SEL_KEY) || 'null'); } catch (e) { return null; } };
+  const saveSel = (ids) => localStorage.setItem(SEL_KEY, JSON.stringify(ids));
 
   function pickQueue() {
     const box = document.getElementById('kg-courses');
@@ -178,11 +182,23 @@
     G.cur = c;
     say(`→ 第 ${job.i + 1}/${job.queue.length} 门：${c.name}，枚举视频…`);
     renderCourses();
-    const pd = await get(`/gateway/system/orgStudent/progressDetails?studentId=${encodeURIComponent(job.stu)}&id=${c.id}&majorId=${who().majorId}&studentCourseId=${c.sid}&version=${c.ver}`);
+    const u = who();
+    const pd = await get(`/gateway/system/orgStudent/progressDetails?studentId=${encodeURIComponent(job.stu)}&id=${c.id}&majorId=${u.majorId}&studentCourseId=${c.sid}&version=${c.ver}`);
     const vids = [];
-    const walk = (n) => { for (const v of (n.courseCatalogVideoVos || [])) vids.push({ id: v.id, unitId: v.unitId || n.id, name: v.name, st: v.studyVideoStatus, len: v.timeLength }); for (const k of (n.children || [])) walk(k); };
+    const walk = (n) => { for (const v of (n.courseCatalogVideoVos || [])) vids.push({ id: v.id, unitId: v.unitId || n.id, name: v.name, len: v.timeLength }); for (const k of (n.children || [])) walk(k); };
     (Array.isArray(pd.data) ? pd.data : []).forEach(walk);
-    const todo = vids.filter((v) => v.st !== 2);
+    // 完成状态只能从关卡接口拿：progressDetails 的视频节点不带 studyVideoStatus，
+    // 它的 haveTime 恒为 0，拿它判会得出「41 条全没看」这种错账。
+    // 关卡接口又会漏掉没有子节点的顶层关卡（如「课程介绍」），所以拿不到状态的按"没看"处理，宁可多播不可漏播。
+    const status = {};
+    try {
+      const bs = await get(`/gateway/system/orgStudent/listCourseBarrier?courseId=${c.id}&majorId=${u.majorId}&userId=${u.id}&version=${c.ver}&studentCourseId=${c.sid}`);
+      for (const b of (bs.data || [])) {
+        const ns = await get(`/gateway/system/orgStudent/listCatalogBarrier?barrierId=${b.id}&studentCourseId=${c.sid}`);
+        for (const n of (ns.data || [])) if (n.videoId) status[n.videoId] = n.studyVideoStatus;
+      }
+    } catch (e) { say('  关卡状态取不到，全部按未看处理：' + e.name); }
+    const todo = vids.filter((v) => status[v.id] !== 2);
     job.curVids = vids.map((v) => v.id);
     job.todo = todo.map((v) => v.id);
     saveJob(job);
@@ -245,12 +261,16 @@
     if (!box) return;
     box.innerHTML = '';
     const job = loadJob();
+    const sel = loadSel();
     G.list.forEach((c) => {
       const gap = Math.max(0, (c._sum || 0) - (c._have || 0));
       const row = document.createElement('label');
       row.style.cssText = 'display:flex;gap:6px;align-items:center;padding:2px 0;font-size:12px';
       const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.dataset.id = c.id; cb.checked = gap > 2;
+      cb.type = 'checkbox'; cb.dataset.id = c.id;
+      // 首次（没存过选择）才按缺口自动勾；之后一律尊重用户自己的勾选，刷新不再冲掉
+      cb.checked = sel ? sel.includes(c.id) : gap > 2;
+      cb.onchange = () => saveSel([...box.querySelectorAll('input:checked')].map((i) => i.dataset.id));
       const nm = document.createElement('span'); nm.style.flex = '1';
       nm.textContent = (c.name || '').slice(0, 14);
       const st = document.createElement('span'); st.style.fontSize = '11px';
