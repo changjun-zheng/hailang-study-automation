@@ -14,7 +14,7 @@
 //   POST /gateway/study/courseCatalogExercisesConfig/checkUpdateExercises -> operationId
 //   POST /gateway/study/studyRecordExercises/createExercisesList / createList
 // 回读判据只认服务端自己的字段：submitFile 是否等于上传返回的 fileId、submitAnswer 是否非空。
-const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
+const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '');

@@ -1,6 +1,6 @@
 // 课程完成度核验：只读，输出平台自己认的账，用于判断"自动播放"是否真的完成
 //   node verify.mjs [--course 软件系统分析与设计]
-const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
+const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const fs = await import('node:fs');
 const path = await import('node:path');
 const arg = (n, d) => {

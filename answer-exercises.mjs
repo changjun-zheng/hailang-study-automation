@@ -10,7 +10,7 @@
 //
 // 关键机制（踩了两天才挖出来）：提交前必须先向 checkUpdateExercises 领一个 operationId，
 // 不带它 createExercisesList 会返回 code:501「操作ID不能为空」。这个 501 不是平台故障。
-const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
+const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '前端框架开发技术');

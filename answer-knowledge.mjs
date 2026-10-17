@@ -22,7 +22,7 @@ const arg = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : ''
 const COURSE = arg('--course') || '前端框架开发技术';
 const APPLY = argv.includes('--apply');
 const LIMIT = Number(arg('--limit') || 0);
-const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
+const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w:)/, '$1'), '..');
 const ARCHIVE = path.join(ROOT, '.cdp', 'knowledge-answers');
 

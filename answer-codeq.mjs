@@ -14,7 +14,7 @@
 //
 // 答案来源：平台自己下发的 referenceAnswer（不是我们编的）。平台没给代码的题（Vue3 那两道给的是中文说明）
 // 一律跳过并如实报告。
-const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
+const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '前端框架开发技术');
