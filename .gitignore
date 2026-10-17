@@ -27,3 +27,5 @@ design-output/**/target/
 
 node_modules/
 .DS_Store
+.cdp/inject-keeper-*.lock
+.cdp/logs/
