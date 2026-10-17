@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.3.1
+// @version      0.3.2
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切标签不中断，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -41,7 +41,7 @@
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.3.1' };
+  window.__kgPanel = { version: '0.3.2' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -332,7 +332,7 @@
           <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳累计 <span id="kg-beat">0</span> · 监控会话 <span id="kg-mon">0</span> · 面板 v0.3.1</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳累计 <span id="kg-beat">0</span> · 监控会话 <span id="kg-mon">0</span> · 面板 v0.3.2</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
@@ -365,6 +365,17 @@
       Promise.all(G.list.map((c) => courseDetails(c).catch(() => { }))).then(renderCourses);
     }, 60000);
     setInterval(renderCourses, 8000);
+    // 有任务但视频停着 = 在等人点播放键。这种情况必须把按钮变成提示，
+    // 否则用户点完「开始」看到画面没动，只会认为面板是假的。
+    setInterval(() => {
+      const btn = document.getElementById('kg-run');
+      if (!btn) return;
+      const job = loadJob();
+      const v = document.querySelector('video');
+      const waiting = !!(job && v && v.paused && !(v.duration && v.currentTime >= v.duration - 0.5));
+      btn.textContent = waiting ? '▶ 请先点一下视频上的播放键（脚本代点不计时长）' : '开始刷勾选的课程（排队）';
+      btn.style.background = waiting ? '#d97706' : '#16a34a';
+    }, 3000);
     const job = loadJob();
     if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，点「继续起播」接着走`); }
     scan();
