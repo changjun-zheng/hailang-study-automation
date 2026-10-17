@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.3.0
+// @version      0.3.1
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切标签不中断，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -41,7 +41,7 @@
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.3.0' };
+  window.__kgPanel = { version: '0.3.1' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -91,11 +91,27 @@
       Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
       Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
     } catch (e) { console.warn('[任务面板] 可见性伪装失败', e); }
+    // 自动续播的判据不能只看「页面被切走」——那样用户亲手按的暂停也会被抢回来
+    // （实测就是这个问题：点暂停没反应，因为 400ms 的恢复定时器照样触发了）。
+    // 所以再记一次「用户刚刚碰过播放器」：三秒内出现过的 pause 一律当用户意图，不续。
+    const markUser = (e) => {
+      const v = document.querySelector('video');
+      if (v) v.__kgUserAt = Date.now();
+    };
+    document.addEventListener('pointerdown', markUser, true);
+    document.addEventListener('keydown', markUser, true);
     document.addEventListener('pause', (e) => {
       const v = e.target;
-      if (!v || v.tagName !== 'VIDEO' || !reallyHidden()) return;   // 用户亲手暂停一律尊重
+      if (!v || v.tagName !== 'VIDEO' || !reallyHidden()) return;
+      if (Date.now() - (v.__kgUserAt || 0) < 3000) return;      // 用户刚碰过播放器，这次暂停是他的
+      if (v.duration && v.currentTime >= v.duration - 0.5) return;  // 播到片尾了，别原地复活
       clearTimeout(v.__kgResume);
-      v.__kgResume = setTimeout(() => { if (reallyHidden() && v.paused) v.play().catch(() => { }); }, 400);
+      v.__kgResume = setTimeout(() => {
+        if (!reallyHidden() || v.paused === false) return;
+        if (Date.now() - (v.__kgUserAt || 0) < 3000) return;
+        if (v.duration && v.currentTime >= v.duration - 0.5) return;
+        v.play().catch(() => { });
+      }, 400);
     }, true);
   }
 
@@ -316,7 +332,7 @@
           <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳累计 <span id="kg-beat">0</span> · 监控会话 <span id="kg-mon">0</span> · 面板 v0.3.0</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳累计 <span id="kg-beat">0</span> · 监控会话 <span id="kg-mon">0</span> · 面板 v0.3.1</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
