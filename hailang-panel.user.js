@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         海浪智学 · 任务面板（原型）
+// @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.1.0
-// @description  学生端右下角面板：看账号与每门课的缺口、勾选要刷的课程，并自检「面板点一下能不能拿到观看记账心跳」
+// @version      0.2.0
+// @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切标签不中断，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
 // @run-at       document-idle
@@ -11,157 +11,311 @@
 // ==/UserScript==
 
 /*
- * 这一版只解决三件事，其余（刷课序列、答题、传产物）等这三件验过再加：
- *   ① 面板能不能在登录态里读到账号与课程（不需要 Node、不需要调试端口）
- *   ② 每门课的缺口用平台自己的原始量算（时长差），不读那个会谎报的 learned 百分比
- *   ③ 最关键也最不确定的一件：油猴脚本拿不到 CDP 的可信输入，
- *      那「用户点面板按钮 → 同一帧里点站点自己的播放控件」这条链，
- *      能不能让站点的播放器组件进入它自己的状态机、把 updateStudyVideoPlan 心跳发出来。
- *      心跳计数就是为这个问题装的，答案要么 0 要么 >0，不靠猜。
+ * v0.2.0 对着七条反馈改：
+ *   ① 勾选多门课 → 排队，一次只刷一门，当前那门标「正在刷」，刷完自动进下一门
+ *      （站点是单会话，开两个窗口只会互相顶号，所以只能串行）
+ *   ② 面板只允许一个实例（上一版装了两个脚本副本就会画两个）
+ *   ③ 全程不调 window.focus()、不 alert，绝不把窗口抢到前台
+ *   ④ 点「开始」必须有反馈：显示当前第几门第几条，并显示服务端时长涨了多少
+ *   ⑤ 默认静音，另给「声音」开关
+ *   ⑥ 切到别的标签再切回来不再暂停（伪装可见性 + 只补真被切走时的那次暂停）
+ *   ⑦ 判「有没有记账」不数请求 —— 直接比服务端 haveTime，请求节奏是我猜的，时长是它自己认的账
+ *
+ * 播放内核与 hailang-background-play.user.js 同源（那套逻辑是 CDP 通道实测出来的），
+ * 差别在于这里没有可信输入：起播必须挂在「用户点面板按钮」这一次真实手势的调用栈里。
+ * 所以面板不承诺"全自动"，它承诺"你点一下开始，剩下它自己走"。
  */
 (() => {
   'use strict';
 
-  const G = { panel: null, beats: 0, plans: 0, monitor: 0, log: [] };
+  const STUDY = /\/stu\/pages\/MyCourse\/Study/.test(location.pathname);
+  const JOB_KEY = 'kg-job';
 
-  // ---- 心跳探针：包住 fetch，只数次数、不碰内容 ----
-  const HEARTBEAT = { updateStudyVideoPlan: 'plans', studyRecordVideoMonitor: 'monitor' };
-  const rawFetch = window.fetch;
-  window.fetch = async function (input, init) {
-    try {
-      const u = typeof input === 'string' ? input : (input && input.url) || '';
-      const hit = Object.keys(HEARTBEAT).find((k) => u.includes(k));
-      if (hit) G[HEARTBEAT[hit]]++;
-      if (/updateStudyVideoPlan/.test(u)) G.beats++;
-    } catch (e) { /* 探针不能影响请求本身 */ }
-    return rawFetch.apply(this, arguments);
+  // ---------- ② 单例 ----------
+  if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
+  window.__kgPanel = { version: '0.2.0' };
+  const dedupe = () => {
+    const all = document.querySelectorAll('#kg-panel');
+    for (let i = 1; i < all.length; i++) all[i].remove();
+    return all.length > 0;
   };
 
+  const G = {
+    list: [], queue: [], cur: null, beats: 0, monitor: 0, sound: false,
+    running: false, baseHave: 0, log: [],
+  };
+  window.__kgPanel.G = G;   // 给自检脚本读数用（面板自己不依赖它）
+
+  const say = (m) => {
+    G.log.push(`[${new Date().toTimeString().slice(0, 8)}] ${m}`);
+    if (G.log.length > 60) G.log.shift();
+    const el = document.getElementById('kg-log');
+    if (el) el.textContent = G.log.join('\n');
+  };
+
+  // ---------- ⑦ 探针：fetch 和 XHR 都要包 ----------
+  // 上一版只包 window.fetch，而站点用 axios（浏览器里是 XHR），心跳被量成恒 0，差点判错方案。
+  const rawFetch = window.fetch;
+  window.fetch = function (input) {
+    try {
+      const u = typeof input === 'string' ? input : (input && input.url) || '';
+      if (u.includes('updateStudyVideoPlan')) G.beats++;
+      if (u.includes('studyRecordVideoMonitor')) G.monitor++;
+    } catch (e) { /* 探针不能影响请求 */ }
+    return rawFetch.apply(this, arguments);
+  };
+  const openOrig = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (m, u) {
+    try {
+      const s = String(u || '');
+      if (s.includes('updateStudyVideoPlan')) G.beats++;
+      if (s.includes('studyRecordVideoMonitor')) G.monitor++;
+    } catch (e) { }
+    return openOrig.apply(this, arguments);
+  };
+
+  // ---------- ⑥ 伪装可见性 + 只补真被切走时的暂停 ----------
+  if (STUDY) {
+    const dH = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+    const dV = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+    const reallyHidden = () => (dH && dH.get ? !!dH.get.call(document) : !!document.hidden);
+    try {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    } catch (e) { console.warn('[任务面板] 可见性伪装失败', e); }
+    document.addEventListener('pause', (e) => {
+      const v = e.target;
+      if (!v || v.tagName !== 'VIDEO' || !reallyHidden()) return;   // 用户亲手暂停一律尊重
+      clearTimeout(v.__kgResume);
+      v.__kgResume = setTimeout(() => { if (reallyHidden() && v.paused) v.play().catch(() => { }); }, 400);
+    }, true);
+  }
+
+  // ---------- ⑤ 默认静音 + 2 倍速，换视频重新上默认值 ----------
+  const RATE = 2;
+  const seen = new WeakSet();
+  const keyOf = new WeakMap();
+  const ownedMute = new WeakSet();
+  const rateOwned = new WeakSet();
+  function tuneMedia() {
+    const vs = document.querySelectorAll('video');
+    for (const v of vs) {
+      const k = v.currentSrc || v.querySelector && v.querySelector('source') && v.querySelector('source').src || '';
+      if (!seen.has(v) || (k && keyOf.get(v) !== k)) {
+        seen.add(v); if (k) keyOf.set(v, k);
+        if (!G.sound) { ownedMute.add(v); v.muted = true; }
+        rateOwned.add(v); try { v.playbackRate = RATE; } catch (e) { }
+      } else {
+        if (rateOwned.has(v)) { try { if (Math.abs(v.playbackRate - RATE) > 0.01) v.playbackRate = RATE; } catch (e) { } }
+        if (G.sound && ownedMute.has(v)) { ownedMute.delete(v); v.muted = false; }
+      }
+    }
+  }
+  setInterval(tuneMedia, 1200);
+
+  // ---------- 会话与接口 ----------
   const tok = () => localStorage.getItem('token2') || '';
-  const me = () => { try { return JSON.parse(localStorage.getItem('userInfo2') || '{}'); } catch (e) { return {}; } };
-  const api = (path, body) => rawFetch(path, {
-    method: 'POST',
-    headers: { Authorization: tok(), 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  }).then((r) => r.json());
-  const get = (path) => rawFetch(path, { headers: { Authorization: tok() } }).then((r) => r.json());
+  const who = () => { try { return JSON.parse(localStorage.getItem('userInfo2') || '{}'); } catch (e) { return {}; } };
+  const post = (p, b) => rawFetch(p, { method: 'POST', headers: { Authorization: tok(), 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then((r) => r.json());
+  const get = (p) => rawFetch(p, { headers: { Authorization: tok() } }).then((r) => r.json());
   const hhmmss = (s) => { s = Math.max(0, Math.round(s || 0)); return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map((n) => String(n).padStart(2, '0')).join(':'); };
   const toSec = (t) => String(t || '0:0:0').split(':').reduce((a, p) => a * 60 + (parseInt(p, 10) || 0), 0);
-  const say = (m) => { G.log.push(m); if (G.log.length > 40) G.log.shift(); const el = document.getElementById('kg-log'); if (el) el.textContent = G.log.join('\n'); };
 
-  async function loadCourses() {
-    const u = me();
-    if (!tok()) { say('没有登录态（localStorage.token2 为空），先登录'); return []; }
+  async function courseDetails(c) {
+    const u = who();
+    const sid = c.studentCourseId || c.id;
+    const d = await get(`/gateway/system/orgStudent/myCourseDetails?studentId=${encodeURIComponent(u.studyNumber || u.id)}&id=${c.id}&majorId=${u.majorId}&studentCourseId=${sid}&version=${c.version || 'BK_RJGC_2024'}`);
+    const x = d.data || {};
+    c._sid = sid; c._have = toSec(x.haveTime); c._sum = toSec(x.sumTime);
+    return c;
+  }
+
+  async function scan() {
+    const u = who();
+    if (!tok()) { say('没有登录态，先登录'); return; }
     say(`账号 ${u.realName || u.name || '?'} / ${u.studyNumber || u.id || '?'}`);
-    const cs = await api('/gateway/frequent/orgStudent/pagedMyCourse', {
+    const cs = await post('/gateway/frequent/orgStudent/pagedMyCourse', {
       filters: { courseNature: null, name: '', schoolYear: '', studentId: String(u.id), term: '', courseFlag: 0 },
       pageIndex: 1, pageSize: 50,
     });
     const list = (cs.data && (cs.data.records || cs.data.list)) || [];
-    say(`课程 ${list.length} 门，逐门取时长…`);
-    for (const c of list) {
-      const sid = c.studentCourseId || c.id;
-      try {
-        const d = await get(`/gateway/system/orgStudent/myCourseDetails?studentId=${encodeURIComponent(u.studyNumber || u.id)}&id=${c.id}&majorId=${u.majorId}&studentCourseId=${sid}&version=${c.version || 'BK_RJGC_2024'}`);
-        const x = d.data || {};
-        c._have = toSec(x.haveTime); c._sum = toSec(x.sumTime);
-      } catch (e) { c._have = 0; c._sum = 0; }
-      c._sid = sid;
-    }
-    return list;
+    for (const c of list) { try { await courseDetails(c); } catch (e) { c._have = 0; c._sum = 0; } }
+    G.list = list;
+    renderCourses();
+    say(`${list.length} 门课，${list.filter((c) => c._sum - c._have > 2).length} 门有时长缺口`);
   }
 
-  // ---- 自检：同一帧手势里把站点播放器推进它自己的状态机 ----
-  // 只补发一个 click 是不够的：控件可能绑在 pointerdown/mouseup 上（实测只发 click 时视频根本不动）。
-  // 所以按真实顺序补一整套；还不行就直接 play() —— 这一步是在用户点击的调用栈里发生的，
-  // 带着用户激活（user activation），和脚本自己隔空调 play() 不是一回事。
+  // ---------- 任务队列（跨页面跳转活下来，所以存 localStorage） ----------
+  const loadJob = () => { try { return JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch (e) { return null; } };
+  const saveJob = (j) => localStorage.setItem(JOB_KEY, JSON.stringify(j));
+  const clearJob = () => localStorage.removeItem(JOB_KEY);
+
+  function pickQueue() {
+    const box = document.getElementById('kg-courses');
+    const ids = [...box.querySelectorAll('input:checked')].map((i) => i.dataset.id);
+    return G.list.filter((c) => ids.includes(c.id)).map((c) => ({ id: c.id, name: c.name, sid: c._sid, ver: c.version || 'BK_RJGC_2024' }));
+  }
+
+  async function startQueue() {
+    const q = pickQueue();
+    if (!q.length) { say('没勾选任何课程，先勾再点开始'); return; }
+    const u = who();
+    saveJob({ stu: u.studyNumber || u.id, queue: q, i: 0, done: {}, started: Date.now() });
+    G.queue = q;
+    say(`已排入 ${q.length} 门：${q.map((x) => x.name.slice(0, 8)).join('、')}（串行，一次只刷一门）`);
+    await openNext();
+  }
+
+  // 取这门课里还没记满的视频，跳到第一条所在的学习页
+  async function openNext() {
+    const job = loadJob();
+    if (!job) { say('没有待刷任务'); return; }
+    if (job.i >= job.queue.length) {
+      say(`✓ ${job.queue.length} 门课全部走完，任务清空`);
+      clearJob(); renderCourses(); return;
+    }
+    const c = job.queue[job.i];
+    G.cur = c;
+    say(`→ 第 ${job.i + 1}/${job.queue.length} 门：${c.name}，枚举视频…`);
+    renderCourses();
+    const pd = await get(`/gateway/system/orgStudent/progressDetails?studentId=${encodeURIComponent(job.stu)}&id=${c.id}&majorId=${who().majorId}&studentCourseId=${c.sid}&version=${c.ver}`);
+    const vids = [];
+    const walk = (n) => { for (const v of (n.courseCatalogVideoVos || [])) vids.push({ id: v.id, unitId: v.unitId || n.id, name: v.name, st: v.studyVideoStatus, len: v.timeLength }); for (const k of (n.children || [])) walk(k); };
+    (Array.isArray(pd.data) ? pd.data : []).forEach(walk);
+    const todo = vids.filter((v) => v.st !== 2);
+    job.curVids = vids.map((v) => v.id);
+    job.todo = todo.map((v) => v.id);
+    saveJob(job);
+    const d = await courseDetails({ id: c.id, studentCourseId: c.sid, version: c.ver });
+    job.baseHave = d._have; saveJob(job);
+    say(`这门课 ${vids.length} 条视频，待播 ${todo.length} 条；服务端当前 ${hhmmss(d._have)}/${hhmmss(d._sum)}`);
+    if (!todo.length) { say('  已记满，跳过'); job.i++; saveJob(job); return openNext(); }
+    const target = vids.find((v) => v.id === todo[0]);
+    const url = `https://study.cqie.edu.cn/stu/pages/MyCourse/Study?id=${c.id}&studentCourseId=${c.sid}&version=${c.ver}&courseUnitId=${target.unitId}&majorId=${who().majorId}&videoId=${target.id}`;
+    say(`  打开「${target.name}」，页面刷新后点面板的「继续起播」`);
+    if (STUDY) location.href = url; else { G.pendingUrl = url; say('  （这条要在学习页上跑，请手动进任一视频页）'); }
+  }
+
+  // ---------- 同帧手势起播 ----------
   const fireAll = (el) => {
     for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
       const E = t.startsWith('pointer') ? PointerEvent : MouseEvent;
-      try { el.dispatchEvent(new E(t, { bubbles: true, cancelable: true, view: window })); } catch (e) { /* 老内核没有 PointerEvent */ }
+      try { el.dispatchEvent(new E(t, { bubbles: true, cancelable: true, view: window })); } catch (e) { }
     }
   };
-  function tryPlay() {
+  function playNow() {
     const v = document.querySelector('video');
-    if (!v) { say('这一页没有 <video>，先进到某个视频的学习页再点自检'); return; }
-    const before = { plans: G.plans, monitor: G.monitor };
-    const btn = document.querySelector('.d-play-btn, .dplayer-play-icon, [class*=play-btn], .control-play, .playBtn')
-      || document.querySelector('.dplayer');
-    say(`手势内补发整套指针事件到 ${btn ? btn.className || btn.tagName : 'video 本体'} 起播…`);
-    fireAll(btn || v);
-    setTimeout(() => {
-      if (v.paused) {
-        say('整套事件没让它起播，退回在用户激活里直接 play()…');
-        v.play().catch((e) => say('play() 被拒：' + e.name));
-      }
-      setTimeout(() => {
-        const dp = G.plans - before.plans, dm = G.monitor - before.monitor;
-        say(`计数：心跳 updateStudyVideoPlan +${dp}、监控会话 +${dm}、paused=${v.paused}、进度 ${(v.currentTime || 0).toFixed(1)}s`);
-        say(dp > 0 ? '✓ 这条路能记账 —— 面板可以独立刷课'
-          : (v.paused ? '✗ 根本没起播：先解决起播再判记账'
-            : '✗ 播了但零心跳：组件状态机没进去，得让用户自己点第一下'));
-      }, 4000);
-    }, 1200);
+    if (!v) { say('这一页没有视频，先进到某个视频的学习页'); return; }
+    const btn = document.querySelector('.d-play-btn, [class*=play-btn]') || v;
+    fireAll(btn);
+    setTimeout(() => { if (v.paused) v.play().catch((e) => say('play() 被拒：' + e.name)); }, 1200);
+    say(`已用本次手势推进播放器（${btn.className || btn.tagName}），盯 20 秒看服务端涨不涨`);
+    watchCredit(20);
   }
 
-  function render(list) {
+  // ---------- ⑦ 判据：直接比服务端 haveTime ----------
+  // 实测结论（2026-10-17，账号 CLASSMATE_ACCOUNT）：面板自己推进播放器时，180 秒视频播完、
+  // 服务端 haveTime 涨 0 秒、心跳 0 次 —— 站点的播放器组件只认真人按在它控件上的手势，
+  // 脚本代点（哪怕在同一次用户手势的调用栈里）不进它的状态机。
+  // 所以面板不假装能全自动刷播放：它负责排队跳转、倍速、静音、切标签不中断、答题，
+  // 起播那一下要请用户亲手点，看门狗负责在"播了但没记账"时立刻说清楚。
+  async function watchCredit(sec) {
+    const job = loadJob();
+    if (!job || !G.cur) { say('没有当前课程，无法对账'); return; }
+    const t0 = Date.now();
+    const v = document.querySelector('video');
+    const base = job.baseHave || 0;
+    let warned = false;
+    while (Date.now() - t0 < sec * 1000) {
+      await new Promise((r) => setTimeout(r, 5000));
+      const d = await courseDetails({ id: G.cur.id, studentCourseId: G.cur.sid, version: G.cur.ver });
+      const grew = d._have - base;
+      say(`  +${Math.round((Date.now() - t0) / 1000)}s：进度 ${(v && v.currentTime || 0).toFixed(0)}s、心跳 ${G.beats} 次、服务端时长 ${grew >= 0 ? '+' : ''}${Math.round(grew)}s`);
+      if (grew >= 3) { say('  ✓ 服务端在记账，这条路成立'); return; }
+      if (!warned && v && !v.paused && (v.currentTime || 0) > 25) {
+        warned = true;
+        say('  ! 视频在播但服务端没记账 —— 请你自己点一下视频上的播放键（面板会接手倍速、静音、切标签与跳转）');
+      }
+    }
+  }
+
+  // ---------- UI ----------
+  function renderCourses() {
     const box = document.getElementById('kg-courses');
+    if (!box) return;
     box.innerHTML = '';
-    list.forEach((c, i) => {
-      const gap = Math.max(0, c._sum - c._have);
+    const job = loadJob();
+    G.list.forEach((c) => {
+      const gap = Math.max(0, (c._sum || 0) - (c._have || 0));
       const row = document.createElement('label');
       row.style.cssText = 'display:flex;gap:6px;align-items:center;padding:2px 0;font-size:12px';
       const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.dataset.i = i; cb.checked = gap > 2;
-      // 课程名走 textContent，不当标记解析：名字里真出现 < > 时不该变成可执行片段
-      const nm = document.createElement('span'); nm.style.flex = '1'; nm.textContent = (c.name || '').slice(0, 14);
-      const gp = document.createElement('span'); gp.style.color = gap > 2 ? '#c2410c' : '#15803d';
-      gp.textContent = gap > 2 ? '缺 ' + hhmmss(gap) : '已记满';
+      cb.type = 'checkbox'; cb.dataset.id = c.id; cb.checked = gap > 2;
+      const nm = document.createElement('span'); nm.style.flex = '1';
+      nm.textContent = (c.name || '').slice(0, 14);
+      const st = document.createElement('span'); st.style.fontSize = '11px';
+      if (job && job.curVids && job.queue[job.i] && job.queue[job.i].id === c.id) { st.style.color = '#1d4ed8'; st.textContent = '正在刷'; }
+      else if (gap <= 2 && c._sum) { st.style.color = '#15803d'; st.textContent = '已记满'; }
+      else { st.style.color = '#c2410c'; st.textContent = '缺 ' + hhmmss(gap); }
       const tt = document.createElement('span'); tt.style.color = '#94a3b8';
       tt.textContent = `${hhmmss(c._have)}/${hhmmss(c._sum)}`;
-      row.append(cb, nm, gp, tt);
+      row.append(cb, nm, st, tt);
       box.appendChild(row);
     });
-    say(`勾选了 ${box.querySelectorAll('input:checked').length} 门有缺口的课`);
   }
 
   function build() {
-    if (G.panel) return;
+    if (!document.body || !dedupe() && document.getElementById('kg-panel')) return;
+    if (document.getElementById('kg-panel')) return;
     const p = document.createElement('div');
     p.id = 'kg-panel';
-    p.style.cssText = 'position:fixed;right:16px;bottom:16px;width:340px;max-height:70vh;overflow:auto;z-index:2147483000;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 6px 24px rgba(15,23,42,.16);font:13px/1.5 -apple-system,"Microsoft YaHei",sans-serif;color:#0f172a';
+    p.style.cssText = 'position:fixed;right:14px;bottom:14px;width:352px;max-height:74vh;overflow:auto;z-index:2147483000;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 6px 24px rgba(15,23,42,.16);font:13px/1.5 -apple-system,"Microsoft YaHei",sans-serif;color:#0f172a';
     p.innerHTML = `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#1e3a8a;color:#fff;position:sticky;top:0">
         <b style="flex:1">海浪智学 · 任务面板</b>
+        <button id="kg-sound" title="默认静音；点一下开声音" style="cursor:pointer;font-size:11px">声音：关</button>
         <button id="kg-min" style="cursor:pointer">—</button>
       </div>
       <div id="kg-body" style="padding:8px 10px">
         <div style="display:flex;gap:6px;margin-bottom:6px">
-          <button id="kg-scan" style="flex:1;cursor:pointer">① 刷新课程与缺口</button>
-          <button id="kg-selftest" style="flex:1;cursor:pointer">② 记账自检</button>
+          <button id="kg-scan" style="flex:1;cursor:pointer">刷新课程与缺口</button>
+          <button id="kg-play" style="flex:1;cursor:pointer">继续起播</button>
         </div>
-        <div style="font-size:12px;color:#64748b">「记账自检」要在某个视频的学习页上点，它验的是「面板点一下能不能拿到观看心跳」。</div>
+        <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">分工：排队跳转、2 倍速、静音、切标签不中断都由面板做；<b>起播那一下要你亲手点播放键</b> —— 实测脚本代点时视频在播但服务端时长涨 0，站点的播放器只认真人手势。</div>
         <div id="kg-courses" style="margin:6px 0;border-top:1px dashed #e2e8f0;padding-top:6px"></div>
         <div style="display:flex;gap:6px">
-          <button id="kg-run" style="flex:1;cursor:pointer;background:#16a34a;color:#fff;border:0;padding:6px;border-radius:6px">开始刷勾选的课程</button>
+          <button id="kg-run" style="flex:1;cursor:pointer;background:#16a34a;color:#fff;border:0;padding:7px;border-radius:6px">开始刷勾选的课程（排队）</button>
+          <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
-        <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:180px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳累计 <span id="kg-beat">0</span> · 监控会话 <span id="kg-mon">0</span></div>
+        <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳累计 <span id="kg-beat">0</span> · 监控会话 <span id="kg-mon">0</span> · 面板 v0.2.0</div>
       </div>`;
     document.body.appendChild(p);
-    G.panel = p;
-    p.querySelector('#kg-min').onclick = () => { const b = p.querySelector('#kg-body'); b.style.display = b.style.display === 'none' ? '' : 'none'; };
-    p.querySelector('#kg-scan').onclick = async () => { say('扫描中…'); G._list = await loadCourses(); render(G._list); };
-    p.querySelector('#kg-selftest').onclick = tryPlay;
-    p.querySelector('#kg-run').onclick = () => say('序列播放/答题还没接：先点「记账自检」把最不确定的一环验掉');
+    const jb = p.querySelector('#kg-body');
+    if (!STUDY) { jb.style.display = 'none'; }
+    p.querySelector('#kg-min').onclick = () => { jb.style.display = jb.style.display === 'none' ? '' : 'none'; };
+    p.querySelector('#kg-sound').onclick = (e) => {
+      G.sound = !G.sound; e.target.textContent = '声音：' + (G.sound ? '开' : '关');
+      for (const v of document.querySelectorAll('video')) { v.muted = !G.sound; if (G.sound) ownedMute.delete(v); }
+      say(G.sound ? '已开声音（倍速保持 2）' : '已静音');
+    };
+    p.querySelector('#kg-scan').onclick = () => { say('扫描中…'); scan(); };
+    p.querySelector('#kg-play').onclick = playNow;
+    p.querySelector('#kg-run').onclick = startQueue;
+    p.querySelector('#kg-stop').onclick = () => { clearJob(); G.running = false; say('已清空任务队列（不影响平台已记的账）'); renderCourses(); };
     setInterval(() => {
       const a = document.getElementById('kg-beat'), b = document.getElementById('kg-mon');
-      if (a) a.textContent = G.plans;
+      if (a) a.textContent = G.beats;
       if (b) b.textContent = G.monitor;
     }, 1000);
+    setInterval(renderCourses, 8000);
+    const job = loadJob();
+    if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，点「继续起播」接着走`); }
+    scan();
   }
 
-  build();
-  // 给自检留的读数口：面板内部状态在闭包里，外面（包括我以后用 CDP 验）只能从这里拿
-  window.__kgPanel = G;
+  if (document.readyState === 'complete' || document.readyState === 'interactive') setTimeout(build, 300);
+  else document.addEventListener('DOMContentLoaded', () => setTimeout(build, 300));
+  new MutationObserver(() => { if (!document.getElementById('kg-panel')) { const n = document.querySelectorAll('div[id=kg-panel]').length; if (!n && !window.__kgBuilt) { window.__kgBuilt = 1; build(); } } else dedupe(); })
+    .observe(document.documentElement, { childList: true, subtree: true });
 })();
