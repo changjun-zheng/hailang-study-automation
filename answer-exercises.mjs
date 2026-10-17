@@ -94,14 +94,14 @@ const raw = await evl(`(async()=>{
           const placeholder=/^(具体过程参见|具体内容请见|见学习视频|见视频和讲义|参见讲义|略)$|^[（(][0-9]+[)）]{0,1}$/.test(txt)||txt.length<20;
           verifiable=!placeholder;
         }
-        return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable};
+        return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable,uc:q.updateCount};
       });
       const todo=items.filter(i=>!i.answered&&i.verifiable);
       const sk=items.filter(i=>!i.answered&&!i.verifiable);
       rec.total=items.length; rec.answered=items.filter(i=>i.answered).length; rec.canDo=todo.length;
       rec.skip=sk.length; rec.skipTypes=[...new Set(sk.map(i=>i.type+'='+i.tname))];
       if(${JSON.stringify(APPLY)}&&oid&&todo.length){
-        const body={poList:todo.map(i=>({submitAnswer:i.ref,exercisesId:i.qid,questionType:i.type,referenceAnswer:i.ref,recordId:null,updateCount:0})),
+        const body={poList:todo.map(i=>({submitAnswer:i.ref,exercisesId:i.qid,questionType:i.type,referenceAnswer:i.ref,recordId:null,updateCount:i.uc||0})),
           operationId:oid,studentCourseId:sid,studentId:me.id,courseId:course.id,unitId:s.unitId,videoId:s.videoId,majorId:me.majorId,version:course.version};
         const w=await P('studyRecordExercises/createExercisesList',body);
         const f=await P('studyRecordExercises/createList',body);   // 「提交练习」

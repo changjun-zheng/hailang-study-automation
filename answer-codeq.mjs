@@ -67,7 +67,7 @@ const list = JSON.parse(await evl(`(async()=>{
     for(const q of (Array.isArray(l.data)?l.data:[])) if(q.questionType===7)
       // 编程题的"已作答"标记是 submitFile，不是 submitAnswer —— 提交时 submitAnswer 恒为 '[]'，
       // 用 !!submitAnswer 判会把空答案当成已答（实测把 7 报成 9）。
-      out.push({unitId:s.unitId,unitName:s.name,qid:q.id,ref:q.referenceAnswer||'',answered:!!q.submitFile,submitFile:q.submitFile||null,recordId:q.recordId||null});
+      out.push({unitId:s.unitId,unitName:s.name,qid:q.id,ref:q.referenceAnswer||'',answered:!!q.submitFile,submitFile:q.submitFile||null,recordId:q.recordId||null,uc:q.updateCount});
     await P('studyRecordExercises/clearStudentUnit',{studentCourseId:sid,unitId:s.unitId});
   }
   return JSON.stringify({ok:true,course:c.name,cid:c.id,sid,me:{id:me.id,majorId:me.majorId},version:c.version,rows:out})
@@ -162,7 +162,7 @@ for (const q of todo) {
     const oid=(ck.data&&(ck.data.operationId||ck.data.id))||'';
     // recordId 要带上服务端已有那条记录的 id：早期实验留下的「无附件旧记录」会遮住新写入，
     // 传 null 时 createExercisesList 照样回 200 但列表里读不到附件（实测两道题栽在这上面）。
-    const body={poList:[{exercisesId:'${q.qid}',questionType:7,submitAnswer:'[]',submitFile:${JSON.stringify(String(fileId))},referenceAnswer:'',recordId:${JSON.stringify(q.recordId || null)},updateCount:0}],
+    const body={poList:[{exercisesId:'${q.qid}',questionType:7,submitAnswer:'[]',submitFile:${JSON.stringify(String(fileId))},referenceAnswer:'',recordId:${JSON.stringify(q.recordId || null)},updateCount:${JSON.stringify(q.uc || 0)}}],
       operationId:oid,studentCourseId:'${list.sid}',unitId:'${q.unitId}',courseId:'${list.cid}'};
     const w=await P('studyRecordExercises/createExercisesList',body);
     const f=await P('studyRecordExercises/createList',body);

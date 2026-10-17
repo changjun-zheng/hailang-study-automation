@@ -11,6 +11,8 @@
 //   POST study/studyKnowledgeExerciseSummaryRecord/createList {poList, ...}
 //
 // 只搬运平台自己下发的 referenceAnswer（单选/多选/判断），简答/设计一类不代做。
+// poList[].updateCount 必须回填服务端那道题自己的值：老师改过题它就不为 0，
+// 硬编码 0 会被判「917 题目已更新，请重新做题」（实测软系分那道卡了三天的题就是这个原因）。
 // 提交后必须回读 exercisesList 看服务端自己的 submitAnswer —— 接口回 200 不算落库。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -74,7 +76,7 @@ const raw = await evl(`(async()=>{
       if(q.questionType===1) ok=right.length===1&&norm(right)===norm(q.referenceAnswer);
       else if(q.questionType===2) ok=right.length>1&&norm(right)===norm(q.referenceAnswer);
       else if(q.questionType===3) ok=/^[01]$/.test(String(q.referenceAnswer==null?'':q.referenceAnswer).trim());
-      return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable:ok};
+      return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable:ok,uc:q.updateCount};
     });
     const todo=items.filter(i=>!i.answered&&i.verifiable);
     const skip=items.filter(i=>!i.answered&&!i.verifiable);
@@ -83,7 +85,7 @@ const raw = await evl(`(async()=>{
     // 分组键必须是【分段知识点】：segmentKnowledgeId 是 createList 的【外层】字段（一组一个），
     // 放进 poList 元素里会被静默忽略，服务端就报 Field 'segment_knowledge_id' doesn't have a default value。
     if(todo.length){ const key=s.segId; if(!groups.has(key)) groups.set(key,{segId:s.segId,unitId:s.unitId,videoId:s.videoId,items:[]});
-      for(const i of todo) groups.get(key).items.push({submitAnswer:i.ref,exercisesId:i.qid,questionType:i.type,referenceAnswer:i.ref,recordId:null,updateCount:0}); }
+      for(const i of todo) groups.get(key).items.push({submitAnswer:i.ref,exercisesId:i.qid,questionType:i.type,referenceAnswer:i.ref,recordId:null,updateCount:i.uc||0}); }
   }
   const glist=[...groups.values()];
   const submitted=[];
