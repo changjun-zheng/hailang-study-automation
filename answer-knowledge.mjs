@@ -21,6 +21,8 @@ const argv = process.argv.slice(2);
 const arg = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : ''; };
 const COURSE = arg('--course') || '前端框架开发技术';
 const APPLY = argv.includes('--apply');
+// 默认整段重做，不信任账号上已有的作答记录；只补漏的加 --only-unanswered
+const REDO = !argv.includes('--only-unanswered');
 const LIMIT = Number(arg('--limit') || 0);
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname.replace(/^\/(\w:)/, '$1'), '..');
@@ -78,7 +80,7 @@ const raw = await evl(`(async()=>{
       else if(q.questionType===3) ok=/^[01]$/.test(String(q.referenceAnswer==null?'':q.referenceAnswer).trim());
       return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable:ok,uc:q.updateCount};
     });
-    const todo=items.filter(i=>!i.answered&&i.verifiable);
+    const todo=items.filter(i=>(${JSON.stringify(REDO)}||!i.answered)&&i.verifiable);
     const skip=items.filter(i=>!i.answered&&!i.verifiable);
     report.push({seg:s.segName,unitId:s.unitId,videoId:s.videoId,total:items.length,answered:items.filter(i=>i.answered).length,can:todo.length,
       skip:skip.length,skipTypes:[...new Set(skip.map(i=>i.type+'='+i.tname))]});

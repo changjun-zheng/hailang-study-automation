@@ -16,6 +16,8 @@
 // 一律跳过并如实报告。
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
+// 默认连已作答的编程题一起重做（不信任账号已有进度）；只补漏的加 --only-unanswered
+const REDO = !process.argv.includes('--only-unanswered');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '前端框架开发技术');
 const ONLY = arg('--unit', '');
@@ -115,7 +117,7 @@ for (const r of picked) {
     : (projDirOf(r.qid) ? '有手写工程但未启用（加 --with-authored）' : '平台没给代码（只给了说明文字）');
   if (!real && projDirOf(r.qid) && !proj) authoredSkipped++;
   console.log(`  ${real || proj ? '·' : '✗'} ${String(r.unitName).slice(0, 30).padEnd(32)} ${how}${r.answered ? ' 已作答' : ''}`);
-  if ((real || proj) && !r.answered) todo.push({ ...r, code, proj });
+  if ((real || proj) && (REDO || !r.answered)) todo.push({ ...r, code, proj });
 }
 if (authoredSkipped) console.log(`\n（${authoredSkipped} 道按你的要求跳过：答案是我手写的工程，不是平台给的答案）`);
 if (!todo.length) { console.log('\n没有可做的编程题'); process.exit(0); }

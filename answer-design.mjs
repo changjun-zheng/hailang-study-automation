@@ -16,6 +16,8 @@
 // 回读判据只认服务端自己的字段：submitFile 是否等于上传返回的 fileId、submitAnswer 是否非空。
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
+// 默认连已作答的设计题槽位一起重做（不信任账号已有进度）；只补漏的加 --only-unanswered
+const REDO = !process.argv.includes('--only-unanswered');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '');
 const ONLY_QID = arg('--qid', '');
@@ -73,7 +75,7 @@ const list = JSON.parse(await evl(`(async()=>{
       for(const q of (Array.isArray(l.data)?l.data:[])){
         if(q.questionType!==8) continue;
         const sa=String(q.submitAnswer||'').trim();
-        if(sa&&sa!=='[]') continue;
+        if(!${JSON.stringify(REDO)}&&sa&&sa!=='[]') continue;   // REDO=false 时才跳过已作答的槽位
         rows.push({course:c.name,cid:c.id,sid,ver,majorId:me.majorId,unitId:s.unitId,unitName:s.name,qid:q.id,score:q.questionScore,recordId:q.recordId||null,uc:q.updateCount});
       }
       await P('studyRecordExercises/clearStudentUnit',{studentCourseId:sid,unitId:s.unitId});

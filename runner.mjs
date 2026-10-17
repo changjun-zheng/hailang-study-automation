@@ -37,7 +37,8 @@ const log = (...a) => console.log(new Date().toTimeString().slice(0, 8), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- CDP ----------
-// 9224 没在监听就自己拉起调试 Chrome：登录态存在独立 profile 里，所以不需要重新登录
+// 没在监听就自己拉起一个调试 Chrome。**默认开可见窗口**：拿到这个工具的人第一次跑时是没登录态的，
+// 无头窗口他根本看不见、也没法登录。要无人值守（profile 里已存过登录态）再加 --headless。
 async function cdpAlive() {
   try {
     return (await fetch(BASE + '/json/version', { signal: AbortSignal.timeout(2500) })).ok;
@@ -47,16 +48,20 @@ async function cdpAlive() {
 }
 if (!(await cdpAlive())) {
   const user = os.userInfo().username;
-  const chrome = `C:\\Users\\${user}\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe`;
-  const profile = `C:\\Users\\${user}\\.hailang-chrome-profile`;
-  console.log('9224 未监听，自动拉起调试 Chrome（独立 profile，登录态在里面上次已存）');
+  const chrome = [
+    `C:\\Users\\${user}\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe`,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  ].find((p) => fs.existsSync(p));
+  if (!chrome) { console.error('找不到 chrome.exe，请手动用带 --remote-debugging-port 的命令启动浏览器'); process.exit(1); }
+  const port = (BASE.match(/:(\d+)/) || [, '9224'])[1];
+  const profile = arg('--profile', `C:\\Users\\${user}\\.hailang-chrome-profile`);
+  const HEADLESS = has('--headless');
+  console.log(`${port} 未监听，新开一个 Chrome（独立 profile：${profile}）—— 请在弹出的窗口里登录，登录后会自动接着跑`);
   // 关键三个开关：不这么做的话，Chrome 会把「被别的应用完全挡住」的窗口当成后台，
-  // 直接推迟媒体加载（readyState 恒 0、duration=NaN），runner 就只能每次导航都把窗口顶到前台 —— 那会把他的屏幕抢走。
+  // 直接推迟媒体加载（readyState 恒 0、duration=NaN），runner 就只能每次导航都把窗口顶到前台 —— 那会把屏幕抢走。
   // --disable-backgrounding-occluded-windows 让被遮挡窗口保持"可见"，后两个保住定时器与渲染进程优先级。
-  // 无头模式：屏幕上根本不出现窗口，彻底杜绝"每换一条视频就弹一次"。
-  // 他明确说过可见窗口（哪怕挪到屏幕外）会干扰学习 —— Windows 会把 -30000 的坐标夹回屏内，所以停放不可靠。
-  const HEADLESS = process.env.HAILANG_HEADLESS !== '0';
-  const args = ['--remote-debugging-port=9224', '--remote-debugging-address=127.0.0.1', '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check', '--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion', '--disable-renderer-backgrounding', '--disable-background-timer-throttling', 'https://study.cqie.edu.cn/stu/home'];
+  const args = [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check', '--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion', '--disable-renderer-backgrounding', '--disable-background-timer-throttling', 'https://study.cqie.edu.cn/stu/home'];
   if (HEADLESS) args.splice(5, 0, '--headless=new', '--disable-gpu', '--window-size=1440,900', '--autoplay-policy=no-user-gesture-required');
   const p = spawn(chrome, args, { detached: true, stdio: 'ignore' });
   p.unref();
@@ -164,6 +169,16 @@ async function postJson(url, body) {
   );
 }
 
+// 新开的那个窗口默认没有登录态：等他自己在里面登进去（最多 10 分钟），不要拿空会话去跑接口。
+for (let i = 0; ; i++) {
+  const u = JSON.parse(await evl(`JSON.stringify((()=>{const t=localStorage.getItem('token2');const x=JSON.parse(localStorage.getItem('userInfo2')||'{}');return {has:!!t,name:x.realName||x.name||'',no:x.studyNumber||x.id||''}})())`));
+  if (u.has && u.no) { if (i) log(`登录完成：${u.name} / ${u.no}`); break; }
+  if (!i) log('等待登录：请在弹出的 Chrome 窗口里登录学生账号（最多等 10 分钟，登录成功后会自动继续）…');
+  else if (i % 12 === 0) log(`  还在等登录，已等 ${i * 5} 秒`);
+  if (i >= 120) { console.error('等了 10 分钟还是没有登录态 —— 确认那个窗口停在 study.cqie.edu.cn 登录页，登录后重跑'); process.exit(1); }
+  await sleep(5000);
+}
+
 const prof = JSON.parse(await evl(`JSON.stringify((()=>{const u=JSON.parse(localStorage.getItem('userInfo2')||'{}');return {id:u.id||'',majorId:u.majorId||'',studyNumber:u.studyNumber||u.id||''}})())`));
 const me = prof.id;
 const majorId = prof.majorId;
@@ -204,7 +219,10 @@ if (ANSWER_ONLY) {
 }
 
 
-const state = fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : { done: {}, exercises: {} };
+// 状态文件是这个账号自己的「已播完」流水账，只用来断点续跑；平台侧的进度一律不信任。
+// 想连自己记的这份也不算、整门课重播一遍，加 --from-zero。
+const state = (fs.existsSync(STATE) && !has('--from-zero')) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : { done: {}, exercises: {} };
+if (has('--from-zero')) log('--from-zero：忽略本账号已记录的完成项，整门课重播一遍');
 const save = () => fs.writeFileSync(STATE, JSON.stringify(state, null, 1));
 
 // 一个关卡下的视频清单（接口返回扁平数组：id=课程单元id）
@@ -349,13 +367,16 @@ async function gotoStudy(url, note) {
 // 把窗口挪到屏幕外：他看不到它，但 Chrome 仍按「可见」渲染（实测 off-screen 时 rAF 6 秒 722 帧、
 // 时间轴照常推进）。比最小化好——最小化会让页面变成 hidden，媒体和上报行为都可能被改。
 async function parkWindow() {
-  if (process.env.HAILANG_HEADLESS !== '0') {
-    log('无头模式：没有窗口，不需要停放');
-    return;
-  }
   if (process.env.KEEP_WINDOW_ONSCREEN) return;
   try {
     const ver = await (await fetch(BASE + '/json/version')).json();
+    // 是不是无头，问实例自己（/json/version 的 Browser 字段），别看环境变量：
+    // 连到别人已经起好的可见实例时环境变量是空的，之前就是这里判错，
+    // 结果最小化的窗口没被还原，页面 document.hidden=true，媒体直接被 Chrome 推迟加载。
+    if (/HeadlessChrome/i.test(String(ver.Browser || ''))) {
+      log('无头实例：没有窗口，不需要停放');
+      return;
+    }
     const bws = new WebSocket(ver.webSocketDebuggerUrl);
     const pend = new Map();
     await new Promise((r) => (bws.onopen = r));
@@ -370,6 +391,7 @@ async function parkWindow() {
     let id = 0;
     const ask = (method, params) => new Promise((r) => { const i = ++id; pend.set(i, r); bws.send(JSON.stringify({ id: i, method, params })); });
     const w = await ask('Browser.getWindowForTarget', { targetId: tab.id });
+    if (w.bounds && w.bounds.windowState === 'minimized') log('  窗口当前是最小化 —— 最小化会让页面变 hidden 并推迟媒体加载，必须还原成 normal 才能记账');
     await ask('Browser.setWindowBounds', { windowId: w.windowId, bounds: { left: -30000, top: -30000, width: 1280, height: 800, windowState: 'normal' } });
     bws.close();
     log('窗口已挪到屏幕外（他看不见，但页面按可见渲染）；要看得见请设 KEEP_WINDOW_ONSCREEN=1 重启');

@@ -12,6 +12,9 @@
 // 不带它 createExercisesList 会返回 code:501「操作ID不能为空」。这个 501 不是平台故障。
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
+// 默认不看「答没答过」，整门课重做一遍（分发出去时不能假设账号是干净的）；
+// 只想补没做的题，加 --only-unanswered。
+const REDO = !process.argv.includes('--only-unanswered');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '前端框架开发技术');
 const ONLY = arg('--unit', '');   // 只处理单元名包含它的单元，用来做小范围验证
@@ -96,7 +99,7 @@ const raw = await evl(`(async()=>{
         }
         return {qid:q.id,type:q.questionType,tname:q.questionTypeName||('题型'+q.questionType),ref:q.referenceAnswer,answered:!!q.submitAnswer,verifiable,uc:q.updateCount};
       });
-      const todo=items.filter(i=>!i.answered&&i.verifiable);
+      const todo=items.filter(i=>(${JSON.stringify(REDO)}||!i.answered)&&i.verifiable);
       const sk=items.filter(i=>!i.answered&&!i.verifiable);
       rec.total=items.length; rec.answered=items.filter(i=>i.answered).length; rec.canDo=todo.length;
       rec.skip=sk.length; rec.skipTypes=[...new Set(sk.map(i=>i.type+'='+i.tname))];
@@ -115,7 +118,9 @@ const raw = await evl(`(async()=>{
         const re=await P('studyRecordExercises/exercisesList',{studentCourseId:sid,courseId:course.id,majorId:me.majorId,unitId:s.unitId,version:course.version});
         const rq=Array.isArray(re.data)?re.data:[];
         // 读不到题就先别判成败：把状态如实标成 readFailed，避免把"没读到"报告成"没落库"
-        rec.verify={before:rec.answered,after:rq.filter(q=>!!q.submitAnswer).length,expect:rec.answered+todo.length,readBack:rq.length,readFailed:rq.length===0};
+        // 期望值只能按「本次里之前没答过的」加：REDO 模式下重交已答题不会让计数变大
+        // （实测重交 5 道已答题：写入/交卷都 200，服务端仍是 5 道已答，既不报错也不增记录）。
+        rec.verify={before:rec.answered,after:rq.filter(q=>!!q.submitAnswer).length,expect:rec.answered+todo.filter(i=>!i.answered).length,retried:todo.filter(i=>i.answered).length,readBack:rq.length,readFailed:rq.length===0};
       }
     }
     // 每个单元用完必须释放那个「同一时刻只允许一个」的习题会话，否则后面所有单元都会 502
@@ -149,7 +154,8 @@ for (const u of v) {
 }
 if (v.length) {
   const done = v.reduce((a, u) => a + (u.verify.readFailed ? 0 : u.verify.after - u.verify.before), 0);
-  console.log(`\n本轮确认落库 ${done} 道（可回读的 ${v.length - unread} 个单元）${unread ? `；另有 ${unread} 个单元读不到题目，未纳入判定` : ''}`);
+  const retried = v.reduce((a, u) => a + (u.verify.retried || 0), 0);
+  console.log(`\n本轮新增落库 ${done} 道（可回读的 ${v.length - unread} 个单元）${retried ? `；另有 ${retried} 道是重交的已答题 —— 服务端计数不变也不报错，不会堆重复记录` : ''}${unread ? `；另有 ${unread} 个单元读不到题目，未纳入判定` : ''}`);
 }
 if (unread) console.log('! 有单元回读为空。这只代表"没读到"，不代表"没提交成功"——用 .cdp/inventory.mjs 独立复核，别据此下结论');
 if (!APPLY) console.log('\n（只读统计，没有提交任何东西。加 --apply 才写）');
