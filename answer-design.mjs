@@ -16,11 +16,18 @@
 // 回读判据只认服务端自己的字段：submitFile 是否等于上传返回的 fileId、submitAnswer 是否非空。
 const BASE = process.argv.indexOf('--cdp')>-1 ? process.argv[process.argv.indexOf('--cdp')+1] : (process.env.CDP_BASE || 'http://127.0.0.1:9224');
 const APPLY = process.argv.includes('--apply');
+// 平台自己已经下发参考答案的设计题（题干带 referenceAnswer），加这个开关就直接把平台答案填进答案框，
+// 不打包、不上传文件。性质和 answer-codeq 交编程题一样，属于「平台下发答案」这一档，
+// 跟「我生成内容以他名义提交」分开开关，别混着默认打开。
+const REF = process.argv.includes('--ref-answer');
 // 默认只补没交过的设计题槽位；要连已作答的一起重交产物时加 --redo-all
 const REDO = process.argv.includes('--redo-all');
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const COURSE = arg('--course', '');
 const ONLY_QID = arg('--qid', '');
+// 题型与产物目录可换：默认只做设计题（type=8，产物在 design-output/<qid>/）。
+// 简答题（type=5）走 essay-output/<qid>/答案.txt，不打包文件，只填答案框。
+const TYPES = (arg('--type', '8') || '8').split(',').map((x) => Number(x.trim())).filter((x) => x);
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,7 +35,7 @@ import { createHash } from 'node:crypto';
 import { buildZip } from './zip-store.mjs';
 
 const ROOT = import.meta.dirname;
-const ART_ROOT = path.join(ROOT, 'design-output');
+const ART_ROOT = path.join(ROOT, arg('--dir', 'design-output'));
 const CACHE = path.join(ROOT, '.cdp', 'design', 'upload-cache.json');
 const SKIP_DIRS = new Set(['target', '.idea', 'node_modules', '.git']);
 
@@ -73,10 +80,10 @@ const list = JSON.parse(await evl(`(async()=>{
       await P('studyRecordExercises/exerciseBarrier',{studentCourseId:sid,unitId:s.unitId});
       const l=await P('studyRecordExercises/exercisesList',{studentCourseId:sid,courseId:c.id,majorId:me.majorId,unitId:s.unitId,version:ver});
       for(const q of (Array.isArray(l.data)?l.data:[])){
-        if(q.questionType!==8) continue;
+        if(!${JSON.stringify(TYPES)}.includes(q.questionType)) continue;
         const sa=String(q.submitAnswer||'').trim();
         if(!${JSON.stringify(REDO)}&&sa&&sa!=='[]') continue;   // REDO=false 时才跳过已作答的槽位
-        rows.push({course:c.name,cid:c.id,sid,ver,majorId:me.majorId,unitId:s.unitId,unitName:s.name,qid:q.id,score:q.questionScore,recordId:q.recordId||null,uc:q.updateCount});
+        rows.push({course:c.name,cid:c.id,sid,ver,majorId:me.majorId,unitId:s.unitId,unitName:s.name,qid:q.id,qt:q.questionType,score:q.questionScore,recordId:q.recordId||null,uc:q.updateCount,ref:String(q.referenceAnswer||'')});
       }
       await P('studyRecordExercises/clearStudentUnit',{studentCourseId:sid,unitId:s.unitId});
     }
@@ -109,7 +116,13 @@ const collect = (qid) => {
 const todo = [];
 for (const s of slots) {
   const a = collect(s.qid);
-  console.log(`  ${a ? '·' : '✗'} ${String(s.course).slice(0, 12).padEnd(14)} ${String(s.unitName).slice(0, 26).padEnd(28)} qid=${String(s.qid).slice(0, 12)} ${a ? `产物 ${a.files.length} 个文件、答案 ${a.text.length} 字` : '没有 design-output/<qid>/答案.txt，跳过'}`);
+  const refText = String(s.ref || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!a && REF && refText.length > 40) {
+    console.log(`  · ${String(s.course).slice(0, 12).padEnd(14)} ${String(s.unitName).slice(0, 26).padEnd(28)} qid=${String(s.qid).slice(0, 12)} 平台已下发参考答案 ${refText.length} 字（--ref-answer：只填答案框、不传文件）`);
+    todo.push({ ...s, art: { dir: '', files: [], text: refText, refOnly: true } });
+    continue;
+  }
+  console.log(`  ${a ? '·' : '✗'} ${String(s.course).slice(0, 12).padEnd(14)} ${String(s.unitName).slice(0, 26).padEnd(28)} qid=${String(s.qid).slice(0, 12)} ${a ? `产物 ${a.files.length} 个文件、答案 ${a.text.length} 字` : (refText.length > 40 ? `本地无产物；平台有参考答案 ${refText.length} 字，加 --ref-answer 可直接回填` : `没有 ${path.basename(ART_ROOT)}/<qid>/答案.txt，跳过`)}`);
   if (a) todo.push({ ...s, art: a });
 }
 if (!todo.length) { console.log('\n没有可提交的设计题产物'); process.exit(0); }
@@ -118,7 +131,8 @@ if (!APPLY) { console.log(`\n（dry-run：${todo.length} 个槽位可以做，�
 // 3) 逐个槽位：打包 -> 上传（按内容哈希复用 fileId，避免重复堆孤儿压缩包）-> 提交 -> 服务端回读
 let cache = {}; try { cache = JSON.parse(fs.readFileSync(CACHE, 'utf8')); } catch {}
 const results = [];
-for (const q of todo) {
+// 打包 + 上传，返回 fileId（拿不到就返回空串）。按内容哈希复用 fileId，避免重复堆孤儿压缩包。
+async function uploadArtifacts(q) {
   const entries = q.art.files.map((rel) => ({ name: rel, data: fs.readFileSync(path.join(q.art.dir, rel)) }));
   const bytes = buildZip(entries);
   const hash = createHash('sha256').update(bytes).digest('hex');
@@ -139,9 +153,19 @@ for (const q of todo) {
     console.log(`  上传: code=${up.code} msg=${String(up.msg || '').slice(0, 80)} fileId=${fileId}`);
     if (fileId) { cache[hash] = { id: fileId, at: new Date().toISOString(), qid: q.qid, unit: q.unitName }; fs.mkdirSync(path.dirname(CACHE), { recursive: true }); fs.writeFileSync(CACHE, JSON.stringify(cache, null, 1)); }
   }
-  if (!fileId) { results.push({ q, ok: false, why: '上传没拿到 fileId' }); continue; }
+  return fileId ? String(fileId) : '';
+}
 
-  const fid = String(fileId);
+for (const q of todo) {
+  // 除答案正文外没有别的产物文件（简答题就是这种）→ 只填答案框，不打包上传，免得在服务端堆没用的压缩包
+  const extras = q.art.files.filter((f) => f !== '答案.txt');
+  let fid = '';
+  if (q.art.refOnly || !extras.length) {
+    console.log(`\n→ ${q.course} / ${q.unitName}（只提交答案文本 ${q.art.text.length} 字，不上传文件${q.art.refOnly ? '，答案来自平台下发的参考答案' : ''}）`);
+  } else {
+    fid = await uploadArtifacts(q);
+    if (!fid) { results.push({ q, ok: false, why: '上传没拿到 fileId' }); continue; }
+  }
   const sub = JSON.parse(await evl(`(async()=>{
     const t=localStorage.getItem('token2');const H={Authorization:t,'Content-Type':'application/json'};
     const me=JSON.parse(localStorage.getItem('userInfo2')||'{}');
@@ -154,7 +178,7 @@ for (const q of todo) {
     const ck=await P('courseCatalogExercisesConfig/checkUpdateExercises',{studentCourseId:sid,courseId:cid,majorId:me.majorId,unitId:uid,version:ver});
     const oid=(ck.data&&(ck.data.operationId||ck.data.id))||'';
     // recordId 带上服务端已有记录的 id，否则旧的无附件记录会遮住新写入（编程题实测踩过）
-    const body={poList:[{exercisesId:qid,questionType:8,submitAnswer:ans,submitFile:${JSON.stringify(fid)},referenceAnswer:'',recordId:${JSON.stringify(q.recordId || null)},updateCount:${JSON.stringify(q.uc || 0)}}],
+    const body={poList:[{exercisesId:qid,questionType:${q.qt},submitAnswer:ans,submitFile:${JSON.stringify(fid)},referenceAnswer:'',recordId:${JSON.stringify(q.recordId || null)},updateCount:${JSON.stringify(q.uc || 0)}}],
       operationId:oid,studentCourseId:sid,unitId:uid,courseId:cid};
     const w=await P('studyRecordExercises/createExercisesList',body);
     const f=await P('studyRecordExercises/createList',body);
@@ -168,7 +192,8 @@ for (const q of todo) {
   })()`));
   const landed = !!(sub.rb.found && sub.rb.file === fid && sub.rb.ansLen > 0);
   console.log(`  提交: oid=${sub.oid} 写入 code=${sub.write.code} ${sub.write.msg} | 交卷 code=${sub.fin.code} ${sub.fin.msg}`);
-  console.log(`  回读: ${sub.rb.found ? `命中（本单元 ${sub.rb.n} 题）submitFile=${sub.rb.file === fid ? '与上传一致' : '不一致:' + sub.rb.file.slice(0, 20)} submitAnswer=${sub.rb.ansLen} 字，开头「${sub.rb.ansHead}」` : `没读到这道题（本单元返回 ${sub.rb.n} 题）`}`);
+  const fileTag = fid ? (sub.rb.file === fid ? '与上传一致' : '不一致:' + String(sub.rb.file).slice(0, 20)) : (sub.rb.file ? `本轮没传文件但服务端有值 ${String(sub.rb.file).slice(0, 20)}` : '本轮不传文件，服务端也为空');
+  console.log(`  回读: ${sub.rb.found ? `命中（本单元 ${sub.rb.n} 题）submitFile=${fileTag} submitAnswer=${sub.rb.ansLen} 字，开头「${sub.rb.ansHead}」` : `没读到这道题（本单元返回 ${sub.rb.n} 题）`}`);
   results.push({ q, ok: landed, unread: !sub.rb.found, detail: sub });
 }
 
