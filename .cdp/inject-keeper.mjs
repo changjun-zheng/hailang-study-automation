@@ -94,11 +94,15 @@ while ((Date.now() - t0) / 3600000 < MAX_HOURS) {
       const src = fs.readFileSync(SRC, 'utf8');
       const want = (src.match(/@version\s+(\S+)/) || [])[1];
       const has = String(await p.evl('(()=>String((window.__kgPanel||{}).version||"none"))()'));
-      if (want && has !== want) {
+      // 正在做题时不许换版：换版会把 #kg-panel 整个删掉重建，跑了一半的那一轮就没人收尾了
+      const busy = String(await p.evl('(()=>String(window.__kgPanel&&window.__kgPanel.G&&window.__kgPanel.G.answering))()'));
+      if (want && has !== want && busy !== 'true') {
         await p.evl(`(()=>{window.__kgBuilt=1;window.__kgPanel=null;const e=document.getElementById('kg-panel');if(e)e.remove();return 1})()`);
         await p.evl(src + '\n;"ok"');
         VER = want;
         L(`注入面板 v${want}（上一个版本 ${has}）`);
+      } else if (want && has !== want && busy === 'true') {
+        L(`页面正在做题，先不打断（新版 v${want} 等下一轮）`);
       }
       if (!started) {
         const st = await p.J(`JSON.stringify((()=>{const G=window.__kgPanel&&window.__kgPanel.G;return{n:G?G.list.length:-1}})())`);

@@ -21,6 +21,8 @@ const o = JSON.parse(await evl(`JSON.stringify((()=>{const v=document.querySelec
   按钮:(document.getElementById('kg-run')||{}).textContent||'-',
   队列:job?('第 '+(job.i+1)+'/'+job.queue.length+' 门，本门第 '+(idx+1)+'/'+job.todo.length+' 条'):'无任务',
   计数:G?('心跳'+G.beats+' 接手'+(G.pauses||0)+' 暂停事件'+(G.pauseSeen||0)+' 迟到'+Math.round(G.late||0)+'ms'):'-',
+  做题状态:G?('进行中='+(!!G.answering)+' 累计落库='+(G.answered||0)+' 自动做题='+(!!G.answerAfter)+' 当前='+(G.cur?G.cur.name:'无')):'-',
+  日志:G?G.log.slice(-Number(${JSON.stringify(process.env.LOGS || '1')})).join('\\n       '):'-',
   日志尾:String((G&&(G.log.slice(-1)[0]||''))||'').slice(0,90)}})())`));
 for (const [k, val] of Object.entries(o)) console.log(`  ${k}：${val}`);
 ws.close(); process.exit(0);

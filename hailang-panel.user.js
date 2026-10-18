@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.5.0
+// @version      0.5.2
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切窗口/切标签被停会自动接手，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -11,6 +11,12 @@
 // ==/UserScript==
 
 /*
+ * v0.5.1 修「点了做题但看不出有没有生效」。实测不是功能坏了 —— 同学A号软系分那一次
+ *   确实交上了（章节习题 96 道 + 知识练习 49 道，16:35:51 完成），但按钮在整整 65 秒里
+ *   纹丝不动，用户以为没反应，又连点三下（日志里「正在做题中，别重复点 ×3」）。
+ *   现在：按钮自己会动（⏳ 做题中… 已交 N 道 → ✓ 已交 N 道 / ＝ 客观题本来就做完了 / ✗ 中断），
+ *   按钮下面加一条常驻结果栏，不用翻日志就能看到结果和时间戳；"0 道"不再长得像失败。
+ *
  * v0.5.0 把做题搬进面板：章节习题 + 知识练习，逻辑从 answer-exercises.mjs / answer-knowledge.mjs 移植。
  *   为什么能搬：答题用的全是同一套同源 HTTP 接口，token 就在 localStorage.token2 里，
  *   油猴脚本自己就能发，不需要 Node、不需要 CDP —— 分发形态因此从"播放靠面板、做题还得找人跑脚本"
@@ -97,7 +103,7 @@
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.5.0' };
+  window.__kgPanel = { version: '0.5.2' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -107,6 +113,7 @@
   const G = {
     list: [], queue: [], cur: null, beats: 0, monitor: 0, mode: 'mute', autoStart: true,
     running: false, baseHave: 0, log: [], waiting: false, late: 0, answerAfter: false, answered: 0, answering: false,
+    ansState: 'idle', ansDone: 0, ansMsg: null, ansLast: null, ansAt: 0,
   };
   window.__kgPanel.G = G;   // 给自检脚本读数用（面板自己不依赖它）
   window.__kgPanel.doAnswer = doAnswer;   // 给探针直接调做题流程；面板自己的按钮走的是同一个函数
@@ -529,19 +536,27 @@
         skip += items.filter((i) => !i.answered && !i.ok).length;
         can += todo.length;
         const before = items.filter((i) => i.answered).length;
+        if (todo.length && !oid) {
+          bad++;
+          say(`  ${String(s.unitName).slice(0, 16)} 没领到 operationId，${todo.length} 道没提交（服务端会判 501）`);
+        }
         if (oid && todo.length) {
           const body = { poList: todo.map((i) => ({ submitAnswer: i.ref, exercisesId: i.qid, questionType: i.type, referenceAnswer: i.ref, recordId: null, updateCount: i.uc || 0 })), operationId: oid, studentCourseId: c.sid, studentId: u.id, courseId: c.id, unitId: s.unitId, videoId: s.videoId, majorId: u.majorId, version: c.ver };
-          await post(SP('studyRecordExercises/createExercisesList'), body);
-          await post(SP('studyRecordExercises/createList'), body);
+          const w = await post(SP('studyRecordExercises/createExercisesList'), body);
+          const f = await post(SP('studyRecordExercises/createList'), body);
           await post(SP('studyRecordExercises/exerciseBarrier'), { studentCourseId: c.sid, unitId: s.unitId });
           const re = await post(SP('studyRecordExercises/exercisesList'), { studentCourseId: c.sid, courseId: c.id, majorId: u.majorId, unitId: s.unitId, version: c.ver });
           const rq = Array.isArray(re.data) ? re.data : [];
           if (!rq.length) unread++;   // 读不到题不单独刷屏，汇总行里报"几个单元没读到"
           else {
             const after = rq.filter((q) => !!q.submitAnswer).length;
-            done += Math.max(0, after - before);
-            if (after < before + todo.length) bad++;
-            if (after < before + todo.length) say(`  ${String(s.unitName).slice(0, 16)} 服务端只记到 ${after}，期望 ≥${before + todo.length}`);
+            const add = Math.max(0, after - before);
+            done += add; G.ansDone = (G.ansDone || 0) + add;   // 给按钮上的实时计数用
+            if (after < before + todo.length) {
+              bad++;
+              // 回读不达标时必须把服务端原话带出来 —— 移植时只丢了这一句，结果第二次重跑还是看不出为什么没记上
+              say(`  ${String(s.unitName).slice(0, 16)} 只记到 ${after}，期望 ≥${before + todo.length}｜写入 code=${w && w.code} ${String((w && w.msg) || '').slice(0, 46)}｜交卷 code=${f && f.code} ${String((f && f.msg) || '').slice(0, 46)}`);
+            }
           }
         }
       }
@@ -586,14 +601,15 @@
       await post(SP('studyKnowledgeExerciseRecord/check'), { segmentKnowledgeId: g.segId, studentCourseId: c.sid, studentId: u.studyNumber || u.id, videoId: g.videoId });
       const l2 = await post(SP('studyKnowledgeExerciseRecord/exercisesList'), { knowledgeNodeId: g.segId, studentCourseId: c.sid, unitId: g.unitId });
       const got = (Array.isArray(l2.data) ? l2.data : []).filter((q) => !!q.submitAnswer).length;
-      if (got >= g.items.length) done += g.items.length; else bad++;
+      if (got >= g.items.length) { done += g.items.length; G.ansDone = (G.ansDone || 0) + g.items.length; } else bad++;
     }
     return { segs: uniq.length, groups: groups.size, can, done, skip, bad };
   }
   async function doAnswer(c) {
     if (G.answering) { say('正在做题中，别重复点'); return; }
     if (!c || !c.sid) { say('没有当前课程：先点「开始」把课程排进队列'); return; }
-    G.answering = true;
+    G.answering = true; G.ansDone = 0; G.ansState = 'run';
+    G.ansLast = `进行中【${c.name}】：只做客观题，已答过的不重交`;
     try {
       say(`开始做题【${c.name}】：只做客观题，且必须过"参考答案与选项双证一致"`);
       const a = await answerExercises(c);
@@ -601,9 +617,18 @@
       const k = await answerKnowledge(c);
       say(`  知识练习：${k.segs} 个分段 / ${k.groups} 组，落库 ${k.done} 道${k.skip ? `；${k.skip} 道不做` : ''}${k.bad ? `；${k.bad} 组回读不达标` : ''}`);
       G.answered = (G.answered || 0) + a.done + k.done;
+      const n = a.done + k.done, skipN = a.skip + k.skip, badN = a.bad + k.bad;
+      const at = new Date().toTimeString().slice(0, 5);
+      G.ansLast = `${at}【${c.name}】章节习题 +${a.done} 道、知识练习 +${k.done} 道已落库${skipN ? `；${skipN} 道不做（简答题要人写、设计/编程题要产物）` : ''}${badN ? `；${badN} 处回读不达标，需要看日志` : ''}${a.unread ? `；${a.unread} 个单元没读到` : ''}`;
+      // 「0 道」不能长得像失败：这门课本来就没题时，说清楚才是好反馈
+      // 有回读不达标就不许显示 ✓：上一版按钮写「＝ 客观题本来就做完了」而状态其实是 bad，自相矛盾
+      G.ansMsg = badN ? `✗ ${badN} 处没记上（原因看结果栏最后一行）` : (n ? `✓ 已交 ${n} 道` : (skipN ? `＝ 客观题都做完了，剩 ${skipN} 道要人写` : '＝ 这门课没有需要做的题'));
+      G.ansState = badN ? 'bad' : 'done'; G.ansAt = Date.now();
       say(`✓ 这门课的题做完（累计落库 ${G.answered} 道）`);
     } catch (e) {
       say('  做题中断：' + e.name + ' ' + String(e.message || '').slice(0, 60));
+      G.ansLast = '做题中断：' + e.name + ' ' + String(e.message || '').slice(0, 60);
+      G.ansMsg = '✗ 中断了，看日志'; G.ansState = 'bad'; G.ansAt = Date.now();
     }
     G.answering = false;
   }
@@ -646,7 +671,7 @@
     p.style.cssText = 'position:fixed;right:14px;bottom:14px;width:352px;max-height:74vh;overflow:auto;z-index:2147483000;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 6px 24px rgba(15,23,42,.16);font:13px/1.5 -apple-system,"Microsoft YaHei",sans-serif;color:#0f172a';
     p.innerHTML = `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#1e3a8a;color:#fff;position:sticky;top:0">
-        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.0</span></b>
+        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.2</span></b>
         <button id="kg-sound" title="静音 / 微声保活 / 开 三态循环：要挂后台请选微声保活" style="cursor:pointer;font-size:11px">声音：静音</button>
         <button id="kg-min" style="cursor:pointer">—</button>
       </div>
@@ -656,10 +681,11 @@
           <button id="kg-play" style="flex:1;cursor:pointer">立即起播</button>
         </div>
         <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#334155;margin-bottom:4px"><input type="checkbox" id="kg-auto" checked>停着就自己起播（不用你点播放键）</label>
-        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
           <button id="kg-ans" style="flex:1;cursor:pointer;background:#7c3aed;color:#fff;border:0;padding:7px;border-radius:6px">做这门课的题（客观题）</button>
           <label style="font-size:11.5px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="kg-ansauto">刷完自动做题</label>
         </div>
+        <div id="kg-ansstat" style="font-size:11.5px;color:#475569;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:6px;padding:4px 6px;margin-bottom:6px">做题结果会显示在这里，不用翻日志</div>
         <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">分工：排队跳转、<b>起播</b>、2 倍速、声音、切窗口接手、<b>做客观题</b>都由面板做。起播用的是打在"真正会被点到的元素"上的合成手势 —— 实测这样服务端照记：60 秒里 haveTime +90 秒（2 倍速看满 60 秒），上报接口全部 HTTP 200。做题只做单选/多选/判断，且平台下发的参考答案必须与选项双证一致；简答题、设计题、编程题要产物或要人写，面板不碰。</div>
         <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">切窗口被停是站点播放器自己按的（失焦即 pause），面板在同一事件里同步接手。<b>要挂着后台跑，请把「声音」切到「微声保活」</b> —— Chrome 只给<b>正在发声</b>的标签豁免定时器节流和内存节省挂起，纯静音的视频会被它当后台处理，这时候页面里的脚本自己也会被冻住，谁都救不了。页脚三个数能分清责任：接手次数、暂停事件次数、定时器最大迟到。</div>
         <div id="kg-courses" style="margin:6px 0;border-top:1px dashed #e2e8f0;padding-top:6px"></div>
@@ -668,7 +694,7 @@
           <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.0</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.2</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
@@ -718,6 +744,19 @@
       if (c) c.textContent = G.pauses || 0;
       if (d) d.textContent = G.pauseSeen || 0;
       if (e) e.textContent = Math.round(G.late || 0);
+      // 做题的按钮必须会动：它一跑就是几十秒，按钮纹丝不动的话用户只会以为没生效，然后连点三下
+      const ab = document.getElementById('kg-ans'), as2 = document.getElementById('kg-ansstat');
+      if (ab) {
+        if (G.ansState === 'run') {
+          ab.textContent = `⏳ 做题中… 已交 ${G.ansDone || 0} 道`;
+          ab.style.background = '#d97706';
+        } else {
+          if (G.ansState !== 'idle' && Date.now() - (G.ansAt || 0) > 90000) { G.ansState = 'idle'; G.ansMsg = null; }
+          ab.textContent = G.ansMsg || '做这门课的题（客观题）';
+          ab.style.background = G.ansState === 'done' ? '#16a34a' : G.ansState === 'bad' ? '#dc2626' : '#7c3aed';
+        }
+      }
+      if (as2) as2.textContent = G.ansLast || '做题结果会显示在这里，不用翻日志';
     }, 1000);
     // 每 60 秒悄悄把每门课的时长重取一遍：上一版只在点「刷新」时才更新，
     // 实测播了 19 分钟面板还停在旧数字，用户以为没在记账。
@@ -766,7 +805,7 @@
     }, 3000);
     const job = loadJob();
     if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，面板会自己起播接着走`); }
-    say('面板 v0.5.0 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
+    say('面板 v0.5.2 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
     scan();
   }
 
