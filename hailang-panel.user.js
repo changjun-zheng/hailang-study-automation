@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.5.2
+// @version      0.5.3
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切窗口/切标签被停会自动接手，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 /*
+ * v0.5.3 修「很多视频差 1 秒没看完，要人工拖到最后看一眼才算完成」。
+ *   成因就在 v0.4.1 那句片尾判据上：我写的是 currentTime >= duration - 1.5 就跳下一条，
+ *   等于**每条视频都被面板提前 1.5 秒拽走**，最后一次上报落在结尾前 1 秒左右 ——
+ *   与他量到的"差 1 秒"在数量级上对得上（软系分 31 条里有 2 条是 6050-2 和 7010 各差 1 秒）。
+ *   现在贴到 duration - 0.15 才算到头，并且跳走前先把指针按到最后一帧、再等 3 秒给站点结清时长。
+ *   注意：这条是"别再制造新的差 1 秒"。已经差 1 秒的那些，队列会整条重播（per-video haveTime
+ *   显示只差 1 秒也要重跑 8 分钟）—— 想只补尾巴就得靠快进，而实测快进会把播放器按停，
+ *   所以"只补最后几秒"暂时不做，先把它当独立的实验题。
+ *
  * v0.5.1 修「点了做题但看不出有没有生效」。实测不是功能坏了 —— 同学A号软系分那一次
  *   确实交上了（章节习题 96 道 + 知识练习 49 道，16:35:51 完成），但按钮在整整 65 秒里
  *   纹丝不动，用户以为没反应，又连点三下（日志里「正在做题中，别重复点 ×3」）。
@@ -103,7 +112,7 @@
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.5.2' };
+  window.__kgPanel = { version: '0.5.3' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -671,7 +680,7 @@
     p.style.cssText = 'position:fixed;right:14px;bottom:14px;width:352px;max-height:74vh;overflow:auto;z-index:2147483000;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 6px 24px rgba(15,23,42,.16);font:13px/1.5 -apple-system,"Microsoft YaHei",sans-serif;color:#0f172a';
     p.innerHTML = `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#1e3a8a;color:#fff;position:sticky;top:0">
-        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.2</span></b>
+        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.3</span></b>
         <button id="kg-sound" title="静音 / 微声保活 / 开 三态循环：要挂后台请选微声保活" style="cursor:pointer;font-size:11px">声音：静音</button>
         <button id="kg-min" style="cursor:pointer">—</button>
       </div>
@@ -694,7 +703,7 @@
           <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.2</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.3</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
@@ -786,8 +795,17 @@
         btn.style.background = '#d97706';
         return;
       }
-      const atEnd = !!(job && v && v.duration && v.currentTime >= v.duration - 1.5);
-      if (atEnd && !G.navigating) { G.navigating = 1; await nextInCourse(); return; }
+      // 片尾判据不能提前：v0.4.1 写的是 duration-1.5，等于每条视频都被我们提前 1.5 秒拽走，
+      // 服务端就记成"差 1 秒没看完"，得人工拖到最后看一眼才算完成。现在贴到真正结束再走。
+      const atEnd = !!(job && v && v.duration > 1 && (v.ended || v.currentTime >= v.duration - 0.15));
+      if (atEnd && !G.navigating) {
+        G.navigating = 1;
+        // 站点这个播放器到片尾会原地重播，所以先把指针按到最后一帧，给它一次"到点"的上报窗口
+        try { v.currentTime = Math.max(0, v.duration - 0.05); } catch (e) { }
+        say('  这条播到头了，停 3 秒让站点把时长结清再跳下一条');
+        setTimeout(() => { nextInCourse(); }, 3000);
+        return;
+      }
       // 有任务、视频停着、而且不是他亲手停的 → 面板自己发起播手势（v0.4.1：实测这样服务端就记账）。
       // 8 秒冷却：一次没起来别每秒猛发，命中的是覆盖在播放器上的控件，连发不好收拾。
       const stuck = !!(job && v && v.paused && resumable(v));
@@ -805,7 +823,7 @@
     }, 3000);
     const job = loadJob();
     if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，面板会自己起播接着走`); }
-    say('面板 v0.5.2 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
+    say('面板 v0.5.3 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
     scan();
   }
 
