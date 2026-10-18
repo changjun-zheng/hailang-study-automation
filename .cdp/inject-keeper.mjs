@@ -14,6 +14,10 @@ const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? proce
 const BASE = arg('--cdp', 'http://127.0.0.1:9226');
 const COURSE = arg('--course', '');
 const DRY = process.argv.includes('--dry');
+// keep 模式：只负责"面板一消失就补上"，不动队列、不判完成、不因为找不到标签就退出。
+// 用来治「这个实例没装 Tampermonkey，一刷新面板就没了」——刷新后最多 5 秒回来。
+const KEEP = process.argv.includes('--keep');
+const TICK = Number(arg('--tick', KEEP ? '5' : '20')) * 1000;
 const MAX_HOURS = Number(arg('--max-hours', '10'));
 const STALL_MINUTES = Number(arg('--stall', '25'));
 const LOCK = path.join(ROOT, '.cdp', `inject-keeper-${new URL(BASE).port}.lock`);
@@ -71,16 +75,16 @@ const REMAIN = (name) => `(async()=>{
   return JSON.stringify({stu:me.studyNumber||me.id,课:c.name,have:have,sum:sum,left:Math.max(0,sum-have),条数:vids.length,记满条数:filledN})
 })()`;
 
-const VER = (fs.readFileSync(SRC, 'utf8').match(/@version\s+(\S+)/) || [])[1];
+let VER = (fs.readFileSync(SRC, 'utf8').match(/@version\s+(\S+)/) || [])[1];   // 必须 let：循环里会跟着工作区的版本走
 L(`注入器启动：目标 ${BASE}，认课=当前页面 URL 里的课程 id（兜底名匹配「${COURSE || '未给'}」），面板 v${VER}${DRY ? '，dry（不注入不点）' : ''}，上限 ${MAX_HOURS} 小时，服务端已学时长 ${STALL_MINUTES} 分钟不涨就停车`);
-let miss = 0, lastRemain = null, lastDropAt = Date.now(), started = false;
+let miss = 0, lastRemain = null, lastDropAt = Date.now(), started = KEEP, tickN = 0;
 const t0 = Date.now();
 while ((Date.now() - t0) / 3600000 < MAX_HOURS) {
   let p = null;
   try { p = await page(); } catch (e) { }
   if (!p) {
     miss++;
-    if (miss > 30) { L('KEEPER_ABORT 连续 30 次找不到学习页标签（窗口被关了？），停车'); process.exit(4); }
+    if (!KEEP && miss > 30) { L('KEEPER_ABORT 连续 30 次找不到学习页标签（窗口被关了？），停车'); process.exit(4); }
     await sleep(5000); continue;
   }
   miss = 0;
@@ -109,22 +113,29 @@ while ((Date.now() - t0) / 3600000 < MAX_HOURS) {
         }
       }
     }
+    // keep 模式不判完成也不停车，只是每 15 跳打一行心跳，证明面板还挂着
+    if (KEEP && ++tickN % 15 !== 1) {
+      try { p.ws.close(); } catch (e) { }
+      await sleep(TICK); continue;
+    }
     const s = await p.J(REMAIN(COURSE));
-    if (s.err) { L(`KEEPER_ABORT ${s.err}`); process.exit(5); }
+    if (s.err) { if (!KEEP) { L(`KEEPER_ABORT ${s.err}`); process.exit(5); } try { p.ws.close(); } catch (e) { } await sleep(TICK); continue; }
     const drop = lastRemain === null || s.left < lastRemain;
     if (drop) lastDropAt = Date.now();
     lastRemain = s.left;
     const hhmmss = (x) => [Math.floor(x / 3600), Math.floor(x / 60) % 60, x % 60].map((n) => String(n).padStart(2, '0')).join(':');
-    L(`账号${s.stu}【${s.课}】服务端已学 ${hhmmss(s.have)}/${hhmmss(s.sum)}，还差 ${Math.round(s.left / 60)} 分钟；目录层记满 ${s.记满条数}/${s.条数} 条${DRY ? '（dry）' : ''}`);
-    if (s.left <= 60) { L(`KEEPER_DONE ${s.课} 已刷完（服务端还差 ${s.left} 秒，阈值 60）`); process.exit(0); }
-    if ((Date.now() - lastDropAt) / 60000 > STALL_MINUTES) {
-      L(`KEEPER_STALL 服务端已学时长 ${STALL_MINUTES} 分钟没上涨，停在 ${hhmmss(s.have)}/${hhmmss(s.sum)}；目录层记满 ${s.记满条数}/${s.条数} 条`);
-      L('  可能是面板没在播（窗口被关/标签被挂起）或某类视频根本不计时长 —— 别继续烧时间，交回人看');
-      process.exit(6);
+    L(`账号${s.stu}【${s.课}】服务端已学 ${hhmmss(s.have)}/${hhmmss(s.sum)}，还差 ${Math.round(s.left / 60)} 分钟；目录层记满 ${s.记满条数}/${s.条数} 条${KEEP ? '（keep：只挂面板）' : DRY ? '（dry）' : ''}`);
+    if (!KEEP) {
+      if (s.left <= 60) { L(`KEEPER_DONE ${s.课} 已刷完（服务端还差 ${s.left} 秒，阈值 60）`); process.exit(0); }
+      if ((Date.now() - lastDropAt) / 60000 > STALL_MINUTES) {
+        L(`KEEPER_STALL 服务端已学时长 ${STALL_MINUTES} 分钟没上涨，停在 ${hhmmss(s.have)}/${hhmmss(s.sum)}；目录层记满 ${s.记满条数}/${s.条数} 条`);
+        L('  可能是面板没在播（窗口被关/标签被挂起）或某类视频根本不计时长 —— 别继续烧时间，交回人看');
+        process.exit(6);
+      }
     }
   } catch (e) { L(`  这一跳失败（页面大概正在导航）：${e.message}`); }
   try { p.ws.close(); } catch (e) { }
-  await sleep(DRY ? 20000 : 20000);
+  await sleep(TICK);
 }
 L('KEEPER_DONE 到时间上限，主动停车');
 process.exit(0);
