@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.4.3
+// @version      0.5.0
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切窗口/切标签被停会自动接手，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -11,6 +11,15 @@
 // ==/UserScript==
 
 /*
+ * v0.5.0 把做题搬进面板：章节习题 + 知识练习，逻辑从 answer-exercises.mjs / answer-knowledge.mjs 移植。
+ *   为什么能搬：答题用的全是同一套同源 HTTP 接口，token 就在 localStorage.token2 里，
+ *   油猴脚本自己就能发，不需要 Node、不需要 CDP —— 分发形态因此从"播放靠面板、做题还得找人跑脚本"
+ *   变成一个脚本全包。
+ *   只做客观题（单选/多选/判断）且必须过双证；主观题（简答/问答/设计）和编程题不做，
+ *   那两类要么要人写、要么要传产物，仍归 answer-design / answer-codeq。
+ *   三条踩过的坑一起搬进来了：领 operationId、逐单元 clearStudentUnit、回读前再 exerciseBarrier。
+ *   入口：紫色「做这门课的题」按钮，或勾上「刷完自动做题」让队列自己接上。
+ *
  * v0.4.3 把 v0.4.2 那条"跳回视频页"真正接通：列表页上面板体被藏掉了，
  *   而常驻注入器又只在学习页注入 —— 结果人停在 /MyCourse/Paged 时既看不到面板也等不到注入，
  *   实测卡 140 秒不动。现在只要还在 /stu/ 下就显示面板，注入器也改成认整个站点。
@@ -88,7 +97,7 @@
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.4.3' };
+  window.__kgPanel = { version: '0.5.0' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -97,9 +106,10 @@
 
   const G = {
     list: [], queue: [], cur: null, beats: 0, monitor: 0, mode: 'mute', autoStart: true,
-    running: false, baseHave: 0, log: [], waiting: false, late: 0,
+    running: false, baseHave: 0, log: [], waiting: false, late: 0, answerAfter: false, answered: 0, answering: false,
   };
   window.__kgPanel.G = G;   // 给自检脚本读数用（面板自己不依赖它）
+  window.__kgPanel.doAnswer = doAnswer;   // 给探针直接调做题流程；面板自己的按钮走的是同一个函数
 
   // 同一条消息重复出现时折成「×N」，不要把它刷满屏。
   // 实测：橙色等待态下他连点几下，日志整屏都是「队列没变」，真正要看的接手/心跳信息被顶掉了。
@@ -399,7 +409,10 @@
     const d = await courseDetails({ id: c.id, studentCourseId: c.sid, version: c.ver });
     job.baseHave = d._have; saveJob(job);
     say(`这门课 ${vids.length} 条视频，待播 ${todo.length} 条；服务端当前 ${hhmmss(d._have)}/${hhmmss(d._sum)}`);
-    if (!todo.length) { say('  已记满，跳过'); job.i++; saveJob(job); return openNext(); }
+    if (!todo.length) {
+      if (G.answerAfter) await doAnswer({ id: c.id, name: c.name, sid: c.sid, ver: c.ver });
+      say('  已记满，跳过'); job.i++; saveJob(job); return openNext();
+    }
     const target = vids.find((v) => v.id === todo[0].id);
     const url = `https://study.cqie.edu.cn/stu/pages/MyCourse/Study?id=${c.id}&studentCourseId=${c.sid}&version=${c.ver}&courseUnitId=${target.unitId}&majorId=${who().majorId}&videoId=${target.id}`;
     say(`  打开「${target.name}」，页面刷新后面板自己起播（不用你点）`);
@@ -466,6 +479,136 @@
     }
   }
 
+  // ---------- 做题（v0.5.0：从 answer-exercises.mjs / answer-knowledge.mjs 移植进来） ----------
+  // 只做客观题（1 单选 / 2 多选 / 3 判断），而且必须过"双证"：平台下发的 referenceAnswer
+  // 要和 optionVos 里 answerFlag==1 的选项 id 集合完全一致（判断题没有第二方证据，只校验取值域）。
+  // 主观题（5/6/8）和编程题（7）不在这里做 —— 那要产物或要人写，交给 answer-design / answer-codeq。
+  // 三条踩过的坑照抄进来了：① 提交前必须领 operationId，否则 501「操作ID不能为空」；
+  // ② 每单元读完必须 clearStudentUnit 释放那个"同一时刻只允许一个"的习题会话，否则后面全 502；
+  // ③ 接口回 200 不算落库，回读前要再 exerciseBarrier 一次，否则读成空列表会误判失败。
+  const SP = (p) => '/gateway/study/' + p;
+  const normAns = (v) => String(v == null ? '' : v).split(/[|,]/).map((x) => x.trim()).filter(Boolean).sort().join(',');
+  const verifiable = (q) => {
+    const right = (q.optionVos || []).filter((o) => o.answerFlag === 1).map((o) => o.id);
+    if (q.questionType === 1) return right.length === 1 && normAns(right) === normAns(q.referenceAnswer);
+    if (q.questionType === 2) return right.length > 1 && normAns(right) === normAns(q.referenceAnswer);
+    if (q.questionType === 3) return /^[01]$/.test(String(q.referenceAnswer == null ? '' : q.referenceAnswer).trim());
+    return false;
+  };
+  async function enumUnits(c) {
+    const u = who();
+    const units = [];
+    try {
+      const bs = await get(`/gateway/system/orgStudent/listCourseBarrier?courseId=${c.id}&majorId=${u.majorId}&userId=${u.id}&version=${c.ver}&studentCourseId=${c.sid}`);
+      for (const b of (bs.data || []).slice().sort((x, y) => (x.sortCode || 0) - (y.sortCode || 0))) {
+        const ns = await get(`/gateway/system/orgStudent/listCatalogBarrier?barrierId=${b.id}&studentCourseId=${c.sid}`);
+        for (const n of (ns.data || [])) if (n.videoId && !units.some((x) => x.unitId === n.id)) units.push({ unitId: n.id, unitName: n.catalogName, videoId: n.videoId });
+      }
+    } catch (e) { /* 关卡接口挂了就走目录树 */ }
+    if (!units.length) {
+      // 非闯关制课程 listCourseBarrier 返空数组。不兜底就会把"没枚举到"读成"这门课没题"
+      const tree = await post(SP('courseCatalog/tree'), { courseId: c.id });
+      const walk = (n) => { for (const x of ((n && n.childList) || [])) { if ((x.videoCount || 0) > 0 && !units.some((y) => y.unitId === x.id)) units.push({ unitId: x.id, unitName: x.name || x.sortName || String(x.id), videoId: null }); walk(x); } };
+      walk((tree && tree.data) || {});
+    }
+    return units;
+  }
+  async function answerExercises(c) {
+    const u = who();
+    const units = await enumUnits(c);
+    let can = 0, done = 0, skip = 0, bad = 0, unread = 0;
+    for (const s of units) {
+      await post(SP('studyRecordExercises/exerciseBarrier'), { studentCourseId: c.sid, unitId: s.unitId });
+      const l = await post(SP('studyRecordExercises/exercisesList'), { studentCourseId: c.sid, courseId: c.id, majorId: u.majorId, unitId: s.unitId, version: c.ver });
+      const qs = Array.isArray(l.data) ? l.data : [];
+      if (qs.length) {
+        const ck = await post(SP('courseCatalogExercisesConfig/checkUpdateExercises'), { studentCourseId: c.sid, courseId: c.id, majorId: u.majorId, unitId: s.unitId, version: c.ver });
+        const oid = (ck.data && (ck.data.operationId || ck.data.id)) || '';
+        const items = qs.map((q) => ({ qid: q.id, type: q.questionType, ref: q.referenceAnswer, answered: !!q.submitAnswer, ok: verifiable(q), uc: q.updateCount }));
+        const todo = items.filter((i) => !i.answered && i.ok);
+        skip += items.filter((i) => !i.answered && !i.ok).length;
+        can += todo.length;
+        const before = items.filter((i) => i.answered).length;
+        if (oid && todo.length) {
+          const body = { poList: todo.map((i) => ({ submitAnswer: i.ref, exercisesId: i.qid, questionType: i.type, referenceAnswer: i.ref, recordId: null, updateCount: i.uc || 0 })), operationId: oid, studentCourseId: c.sid, studentId: u.id, courseId: c.id, unitId: s.unitId, videoId: s.videoId, majorId: u.majorId, version: c.ver };
+          await post(SP('studyRecordExercises/createExercisesList'), body);
+          await post(SP('studyRecordExercises/createList'), body);
+          await post(SP('studyRecordExercises/exerciseBarrier'), { studentCourseId: c.sid, unitId: s.unitId });
+          const re = await post(SP('studyRecordExercises/exercisesList'), { studentCourseId: c.sid, courseId: c.id, majorId: u.majorId, unitId: s.unitId, version: c.ver });
+          const rq = Array.isArray(re.data) ? re.data : [];
+          if (!rq.length) unread++;   // 读不到题不单独刷屏，汇总行里报"几个单元没读到"
+          else {
+            const after = rq.filter((q) => !!q.submitAnswer).length;
+            done += Math.max(0, after - before);
+            if (after < before + todo.length) bad++;
+            if (after < before + todo.length) say(`  ${String(s.unitName).slice(0, 16)} 服务端只记到 ${after}，期望 ≥${before + todo.length}`);
+          }
+        }
+      }
+      await post(SP('studyRecordExercises/clearStudentUnit'), { studentCourseId: c.sid, unitId: s.unitId });
+    }
+    return { units: units.length, can, done, skip, bad, unread };
+  }
+  async function answerKnowledge(c) {
+    const u = who();
+    const pd = await get(`/gateway/system/orgStudent/progressDetails?studentId=${encodeURIComponent(u.studyNumber || u.id)}&id=${c.id}&majorId=${u.majorId}&studentCourseId=${c.sid}&version=${c.ver}`);
+    const segs = [];
+    const walk = (n, parent) => {
+      if (!n || typeof n !== 'object') return;
+      for (const [k, v] of Object.entries(n)) {
+        if (Array.isArray(v) && /KnowledgeTimeRanges/.test(k) && !/Vos$/.test(k)) for (const s of v) if (s && s.id) segs.push({ segId: s.id, unitId: (parent && parent.unitId) || '', videoId: (parent && (parent.videoId || parent.id)) || '' });
+        if (Array.isArray(v)) for (const it of v) if (it && typeof it === 'object') walk(it, it);
+        else if (v && typeof v === 'object') walk(v, parent);
+      }
+    };
+    walk({ children: Array.isArray(pd.data) ? pd.data : [] }, null);
+    const uniq = [...new Map(segs.map((s) => [s.segId, s])).values()].filter((s) => s.unitId && s.videoId);
+    const groups = new Map();
+    let can = 0, skip = 0;
+    for (const s of uniq) {
+      await post(SP('studyKnowledgeExerciseRecord/check'), { segmentKnowledgeId: s.segId, studentCourseId: c.sid, studentId: u.studyNumber || u.id, videoId: s.videoId });
+      const l = await post(SP('studyKnowledgeExerciseRecord/exercisesList'), { knowledgeNodeId: s.segId, studentCourseId: c.sid, unitId: s.unitId });
+      const qs = Array.isArray(l.data) ? l.data : [];
+      if (!qs.length) continue;
+      const items = qs.map((q) => ({ qid: q.id, type: q.questionType, ref: q.referenceAnswer, answered: !!q.submitAnswer, ok: verifiable(q), uc: q.updateCount }));
+      const todo = items.filter((i) => !i.answered && i.ok);
+      skip += items.filter((i) => !i.answered && !i.ok).length;
+      can += todo.length;
+      if (todo.length) {
+        if (!groups.has(s.segId)) groups.set(s.segId, { segId: s.segId, unitId: s.unitId, videoId: s.videoId, items: [] });
+        for (const i of todo) groups.get(s.segId).items.push({ submitAnswer: i.ref, exercisesId: i.qid, questionType: i.type, referenceAnswer: i.ref, recordId: null, updateCount: i.uc || 0 });
+      }
+    }
+    let done = 0, bad = 0;
+    for (const g of groups.values()) {
+      // segmentKnowledgeId 必须在**外层**：塞进 poList 元素里会被静默忽略，服务端报 doesn't have a default value
+      await post(SP('studyKnowledgeExerciseSummaryRecord/createList'), { segmentKnowledgeId: g.segId, poList: g.items, studentCourseId: c.sid, studentId: u.id, courseId: c.id, videoId: g.videoId, unitId: g.unitId, majorId: u.majorId, version: c.ver });
+      await post(SP('studyKnowledgeExerciseRecord/check'), { segmentKnowledgeId: g.segId, studentCourseId: c.sid, studentId: u.studyNumber || u.id, videoId: g.videoId });
+      const l2 = await post(SP('studyKnowledgeExerciseRecord/exercisesList'), { knowledgeNodeId: g.segId, studentCourseId: c.sid, unitId: g.unitId });
+      const got = (Array.isArray(l2.data) ? l2.data : []).filter((q) => !!q.submitAnswer).length;
+      if (got >= g.items.length) done += g.items.length; else bad++;
+    }
+    return { segs: uniq.length, groups: groups.size, can, done, skip, bad };
+  }
+  async function doAnswer(c) {
+    if (G.answering) { say('正在做题中，别重复点'); return; }
+    if (!c || !c.sid) { say('没有当前课程：先点「开始」把课程排进队列'); return; }
+    G.answering = true;
+    try {
+      say(`开始做题【${c.name}】：只做客观题，且必须过"参考答案与选项双证一致"`);
+      const a = await answerExercises(c);
+      say(`  章节习题：${a.units} 个单元，落库 ${a.done} 道${a.skip ? `；${a.skip} 道不做（主观题/编程题/双证不一致）` : ''}${a.bad ? `；${a.bad} 个单元回读不达标` : ''}${a.unread ? `；${a.unread} 个单元没读到` : ''}`);
+      const k = await answerKnowledge(c);
+      say(`  知识练习：${k.segs} 个分段 / ${k.groups} 组，落库 ${k.done} 道${k.skip ? `；${k.skip} 道不做` : ''}${k.bad ? `；${k.bad} 组回读不达标` : ''}`);
+      G.answered = (G.answered || 0) + a.done + k.done;
+      say(`✓ 这门课的题做完（累计落库 ${G.answered} 道）`);
+    } catch (e) {
+      say('  做题中断：' + e.name + ' ' + String(e.message || '').slice(0, 60));
+    }
+    G.answering = false;
+  }
+
+
   // ---------- UI ----------
   function renderCourses() {
     const box = document.getElementById('kg-courses');
@@ -503,7 +646,7 @@
     p.style.cssText = 'position:fixed;right:14px;bottom:14px;width:352px;max-height:74vh;overflow:auto;z-index:2147483000;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 6px 24px rgba(15,23,42,.16);font:13px/1.5 -apple-system,"Microsoft YaHei",sans-serif;color:#0f172a';
     p.innerHTML = `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#1e3a8a;color:#fff;position:sticky;top:0">
-        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.4.3</span></b>
+        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.0</span></b>
         <button id="kg-sound" title="静音 / 微声保活 / 开 三态循环：要挂后台请选微声保活" style="cursor:pointer;font-size:11px">声音：静音</button>
         <button id="kg-min" style="cursor:pointer">—</button>
       </div>
@@ -513,7 +656,11 @@
           <button id="kg-play" style="flex:1;cursor:pointer">立即起播</button>
         </div>
         <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#334155;margin-bottom:4px"><input type="checkbox" id="kg-auto" checked>停着就自己起播（不用你点播放键）</label>
-        <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">分工：排队跳转、<b>起播</b>、2 倍速、声音、切窗口接手都由面板做。起播用的是打在"真正会被点到的元素"上的合成手势 —— 实测这样服务端照记：60 秒里 haveTime +90 秒（2 倍速看满 60 秒），上报接口全部 HTTP 200。</div>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <button id="kg-ans" style="flex:1;cursor:pointer;background:#7c3aed;color:#fff;border:0;padding:7px;border-radius:6px">做这门课的题（客观题）</button>
+          <label style="font-size:11.5px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="kg-ansauto">刷完自动做题</label>
+        </div>
+        <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">分工：排队跳转、<b>起播</b>、2 倍速、声音、切窗口接手、<b>做客观题</b>都由面板做。起播用的是打在"真正会被点到的元素"上的合成手势 —— 实测这样服务端照记：60 秒里 haveTime +90 秒（2 倍速看满 60 秒），上报接口全部 HTTP 200。做题只做单选/多选/判断，且平台下发的参考答案必须与选项双证一致；简答题、设计题、编程题要产物或要人写，面板不碰。</div>
         <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">切窗口被停是站点播放器自己按的（失焦即 pause），面板在同一事件里同步接手。<b>要挂着后台跑，请把「声音」切到「微声保活」</b> —— Chrome 只给<b>正在发声</b>的标签豁免定时器节流和内存节省挂起，纯静音的视频会被它当后台处理，这时候页面里的脚本自己也会被冻住，谁都救不了。页脚三个数能分清责任：接手次数、暂停事件次数、定时器最大迟到。</div>
         <div id="kg-courses" style="margin:6px 0;border-top:1px dashed #e2e8f0;padding-top:6px"></div>
         <div style="display:flex;gap:6px">
@@ -521,7 +668,7 @@
           <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.4.3</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.0</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
@@ -537,6 +684,11 @@
       say(G.mode === 'whisper' ? '微声保活：音量 0.02，几乎听不见，但 Chrome 会把它当"正在发声的标签"，后台不节流、不挂起' : '声音：' + modeLabel() + '（倍速保持 2）');
     };
     p.querySelector('#kg-scan').onclick = () => { say('扫描中…'); scan(); };
+    p.querySelector('#kg-ans').onclick = () => { const job = loadJob(); doAnswer(G.cur || (job && job.queue[job.i]) || null); };
+    p.querySelector('#kg-ansauto').onchange = (e) => {
+      G.answerAfter = e.target.checked;
+      say(G.answerAfter ? '已开：每门课刷完时长后接着做这门课的客观题（章节习题 + 知识练习）' : '已关：只刷时长，不做题');
+    };
     p.querySelector('#kg-play').onclick = playNow;
     p.querySelector('#kg-auto').onchange = (e) => {
       G.autoStart = e.target.checked;
@@ -614,7 +766,7 @@
     }, 3000);
     const job = loadJob();
     if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，面板会自己起播接着走`); }
-    say('面板 v0.4.3 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
+    say('面板 v0.5.0 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
     scan();
   }
 
