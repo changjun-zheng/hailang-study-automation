@@ -1,4 +1,4 @@
-# hailang-AutoCourse
+# hailang-study-automation
 
 重庆工程学院「海浪智学」学生端（`study.cqie.edu.cn/stu/home`）的课程学习自动化工具，附带对该平台**进度记账与答题接口机制**的实测记录。
 
