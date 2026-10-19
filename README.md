@@ -1,42 +1,54 @@
 # hailang-AutoCourse
 
-重庆工程学院「海浪智学」学生端（`study.cqie.edu.cn/stu/home`）的课程视频后台自动播放工具，附带对该平台**进度记账机制**的实测记录。
+重庆工程学院「海浪智学」学生端（`study.cqie.edu.cn/stu/home`）的课程学习自动化工具，附带对该平台**进度记账与答题接口机制**的实测记录。
 
-零第三方依赖：只用 Node ≥ 24 内置的 `fetch` / `WebSocket` 直连 Chrome DevTools 协议，不用 Puppeteer / Playwright / Selenium。
+零第三方依赖：只用 Node ≥ 24 内置的 `fetch` / `WebSocket` 直连 Chrome DevTools 协议，不用 Puppeteer / Playwright / Selenium；油猴面板不依赖本仓库其它部分，单独可用。
 
 ---
 
-## 一、怎么用
+## 使用前请读
 
-前提：本机装了 Chrome，且有一个能用的登录态。工具会**自己拉起**一个 headless Chrome（专用 profile，不与日常浏览器共用）。
+- 工具自动化的是**你自己账号上的真实学习行为**：视频照常播、题照常按平台下发的参考答案交。平台是否认定违规、由谁承担后果，属于使用者自己的判断，本仓库不提供任何保证。
+- 一人一号。这个平台**单会话**，共享账号会互相顶下线，而且记录会混在一起。
+- 仓库里**不含任何人的姓名、学号、登录令牌、运行日志和截图**（见第七节）。所有示例里的课程名和题号都是公开课件内容。
+
+---
+
+## 一、两种形态
+
+### A. 油猴面板（推荐给同学，不需要 Node）
+
+`hailang-panel.user.js`（当前 v0.5.3）。装进 Tampermonkey 后，在学习页右下角出现面板：
+
+| 能力 | 说明 |
+| --- | --- |
+| 账号与每门课缺口 | 直接读服务端 `myCourseDetails` 的秒数，不信界面百分比 |
+| 勾选课程排队刷 | 串行，一次只刷一门；当前那门标「正在刷 第 x/y 条」 |
+| 自动起播 | 合成手势打在 `document.elementFromPoint` 命中的元素上，实测服务端记账 |
+| 2 倍速 + 声音三态 | 静音 / 微声保活（音量 0.02，换 Chrome 后台豁免）/ 开 |
+| 切窗口接手 | 站点播放器失焦会自己 `pause`，面板在同一个事件里同步接手 |
+| 片尾自己跳下一条 | 站点到片尾会弹「有习题待完成」并停住，面板关掉弹窗后跳下一条 |
+| 做客观题 | 章节习题 + 知识练习，只交「平台下发参考答案 + 与选项双证一致」的题 |
+| 自证仪表 | 页脚：心跳 / 监控 / 接手 / 暂停事件 / 定时器最大迟到，用来分清责任 |
+
+安装：Tampermonkey → 新建脚本 → 粘贴文件全文 → 保存 → 刷新学习页；标题栏显示版本号才算装上。
+
+只要"切到后台别停"的话，用更小的 `hailang-background-play.user.js`：后台续播 + 每条视频默认静音 + 默认 2 倍速，没有面板界面。
+
+### B. 长跑脚本（本机批量，需要 Node）
 
 ```bash
-node runner.mjs --course 软件系统分析与设计      # 单门课，跑到全部播完
-node verify.mjs --course 软件系统分析与设计      # 只读核验：打印平台自己认的账
-node .cdp/records.mjs                            # 五门课的完整账目对照
+node runner.mjs --course <课程名>            # 起 headless Chrome，按关卡顺序播完全部视频
+node verify.mjs --course <课程名>            # 只读核验：打印平台自己认的账
+node .cdp/inventory.mjs <课程名>             # 只读盘点：单元数/题目数/已答/可自动作答/题型分布
+node answer-exercises.mjs --course <课程名>          # 只读统计
+node answer-exercises.mjs --course <课程名> --apply  # 真正提交
+node answer-knowledge.mjs --course <课程名> --apply  # 知识练习（分段知识点层）
+node answer-codeq.mjs --course <课程名> --apply      # 编程题（只交平台有答案的）
+node answer-design.mjs --course <课程名> --apply     # 设计题（需要本地产物，见脚本头注释）
 ```
 
-多门课串跑（当前在用的形态）：
-
-```bash
-node .cdp/supervise.mjs --course 前端框架开发技术 >> vue-play.log   # 守护：断了自动重起
-node .cdp/queue.mjs >> queue.log                                    # 队列：上一门收尾后接下一门
-powershell -File .cdp/stop-jobs.ps1                                 # 停车（连队列一起停）
-```
-
-重启顺序必须是**先 supervise 再 queue**，否则 queue 会在没人跑的状态下直接推进到下一门。
-
-油猴脚本（自己的日常浏览器里用，不依赖本仓库其它部分）：`hailang-background-play.user.js`
-作用是被切到后台时继续播放 + 每条视频默认静音 + 默认 2 倍速；实测 2 倍速是真实有效的 2.00 倍，不是"界面显示 2x、实际被降帧"。
-
-环境变量：
-
-| 变量 | 默认 | 作用 |
-| --- | --- | --- |
-| `HAILANG_HEADLESS=0` | headless | 改成有窗口模式（调试用） |
-| `HAILANG_RATE=1` | 2 | 注入前覆盖默认倍速 |
-| `ALLOW_FOREGROUND=1` | 不抢屏幕 | 允许在媒体加载不出来时把窗口提到前台 |
-| `CDP_BASE` | `http://127.0.0.1:9224` | DevTools 端口 |
+所有脚本都支持 `--cdp http://127.0.0.1:<端口>`，默认 `9224`。多门课串跑用 `.cdp/supervise.mjs` + `.cdp/queue.mjs`，停车用 `powershell -File .cdp/stop-jobs.ps1`。
 
 ---
 
@@ -44,26 +56,29 @@ powershell -File .cdp/stop-jobs.ps1                                 # 停车（�
 
 ### 1. 鉴权不在 Cookie
 
-登录态是 `localStorage.token2` 里的一枚 JWT，**没有 `exp`**，所以关掉浏览器重开还在。所有请求靠 `Authorization: <token2>` 头，Cookie 参与不了。
+登录态是 `localStorage.token2` 里的一枚 JWT，**没有 `exp`**，所以关掉浏览器重开还在。所有请求靠 `Authorization: <token2>` 头，Cookie 参与不了。令牌本身不入库、不打日志。
 
 一个账号**只允许一个活跃会话**。别处登录会把这边顶掉，返回体是 `code:488 / "当前账号于 HH:MM 在其他设备上登录,此客户端已退出登录。"`；被顶掉之后读接口仍然回 200 但没有数据，很容易误判成"课没了"，所以 `runner.mjs` 里有一个 `guard()` 专门识别它并以退出码 4 终止，不做无谓重试。
 
-### 2. 进度是怎么记账的 —— 反直觉的那条
+### 2. 起播的记账开关：打在"真正会被点到的元素"上
 
-**播放过程中不上报任何进度。** 全程只有两个请求：
+这是踩了两轮才挖清楚的一条。站点的播放键 `.d-play-btn` 被一层透明的 `INPUT.d-player-input` 盖着，`document.elementFromPoint` 在播放键中心命中的是那个 `INPUT`。
 
-- 进入视频页：`GET /gateway/system/orgStudent/studyVideo`（开启一条监控记录）
-- 离开视频页：`GET /gateway/study/studyRecordVideoMonitor/updateEndTime`（关闭）
+- 事件打在 `.d-play-btn` 自己身上 → 进不了播放器组件的状态机 → 零心跳、零记账
+- 事件打在 `elementFromPoint` 命中的元素上 → **合成事件（`isTrusted=false`）照样记账**：实测一条 0 秒未记的视频，180 秒里服务端 `haveTime` +268 秒，`updateStudyVideoPlan` 全部 HTTP 200
+- 单独调 `video.play()` → 画面在动但组件状态机停在"暂停" → 零心跳
 
-也就是说服务端只拿到"开始时刻"和"结束时刻"两个戳，中间没有心跳、没有 `currentTime` 上报。这条结论是**排除了 8 个客户端变量**之后剩下的唯一解释：是否前台、是否真实可见、倍速 1x/2x、是否点目录切换 vs 直接导航、是否手动关闭上一条监控、冷启动 vs 续播、时长是否播满、`haveTime` 字段各种写法——每一个都做了对照实验，都不影响记账。
+所以"脚本代点不计时长、必须真人点一下"这个说法是错的，真正的原因是命中元素不对。
 
-反过来，**跨课数据证明记账本身是通的**：软件系统分析与设计 6:17:31/6:21:13、软件工程 7:05:45/7:05:56、软件测试 5:55:17/5:58:40、框架程序设计 10:50:42/10:52:54 都记上了；只有前端框架开发技术长期停在 01:33:03/08:20:21。
+### 3. `haveTime` 是**按秒累计**的，而且有两条陷阱
 
-按使用方的口径，**没记上的原因是"每条视频挂的练习题没做，做了才算完成"**——即视频长度只是必要条件之一，不是充分条件。这解释了上面那组"四门记上、一门没记上"的差异。
+- 它随真实观看秒数增长，不是"看完才结算"；2 倍速下 60 秒墙钟涨约 90~120 秒视频时长。
+- **每条视频各自有上限**：`progressDetails` 的视频节点带自己的 `haveTime`，等于 `timeLength` 就是记满，再播一秒也不涨。拿一条已记满的视频做实验，永远量到"+0"，会被误判成"工具没生效"。
+- 但**分段关卡制的课**（如前端框架开发技术）目录层 `haveTime` 恒为 0，这类课只能退回课程级 `myCourseDetails.haveTime/sumTime` 判。
 
-### 3. 播放器：DPlayer，且它会**复用同一个 `<video>` 元素**
+### 4. 播放器会**复用同一个 `<video>` 元素**
 
-切下一条视频不换 DOM 节点，只换 `src`，并且**把 `muted` 和 `playbackRate` 重置回默认**。这就是"第一条静音了，下一条又有声音"的根因——任何"每个元素只处理一次"的写法（`WeakSet` 标记一次就不再管）在这个播放器上必然漏。
+切下一条不换 DOM 节点，只换 `src`，并且**把 `muted` 和 `playbackRate` 重置回默认**。这就是"第一条静音了，下一条又有声音"的根因——任何"每个元素只处理一次"（`WeakSet` 标记一次就不再管）的写法在这个播放器上必然漏。
 
 正确做法是**以"视频身份"为键而不是以"元素"为键**：
 
@@ -73,9 +88,9 @@ const keyOf = (v) => v.currentSrc || v.src || '';
 // src 没变 ⇒ 是同一条，绝不覆盖用户在这一条里的手动选择
 ```
 
-同时区分"谁拥有这个状态"：脚本自己设的（`selfMute` / `selfRate`）要维持，用户在 1500ms 内真实 pointerdown/keydown 之后改的（`muteOwned` / `rateOwned`）要认账——不能把他手动取消的静音再按回去。这套逻辑有一个 8 条断言的回归夹具：`.cdp/mute-unit-test.html` + `.cdp/run-mute-test.mjs`，逐条覆盖"第一条 / 播放器自己取消静音 / 他自己取消 / 他自己改 1.5x / 切下一条要重新静音 / 切下一条要重新 2x / 播放器自己重置倍速"。
+同时区分"谁拥有这个状态"：脚本自己设的要维持，用户在约 1.5 秒内真实 pointerdown/keydown 之后改的要认账——不能把他手动取消的静音再按回去。这套逻辑有 8 条断言的回归夹具：`.cdp/mute-unit-test.html` + `.cdp/run-mute-test.mjs`。
 
-### 4. 片尾是**原地重播**，不发 `ended`、不换 videoId
+### 5. 片尾是**原地重播**，不发 `ended`、不换 videoId
 
 播放器循环，2 秒一轮，`ended` 事件刚好被跳过。完成判定只认这一个特征：
 
@@ -86,13 +101,16 @@ s.vid === prev && lastT >= s.d - 30 && s.t < lastT - 10
 
 中途续播和主动重载都是**往前跳**，不会命中这个条件，所以不会误判。
 
-### 5. 不抢屏幕只有一条路：headless
+顺带一条实测教训：片尾判据**不许提前**。曾经写成 `currentTime >= duration - 1.5` 就跳下一条，结果每条视频都被提前 1.5 秒拽走，服务端记成"差 1 秒没看完"，得人工拖到最后才算完成。
+
+### 6. 不抢屏幕只有一条路：headless 或遮挡豁免
 
 曾试过并**证明无效**的两条：
-- `Target.activateTarget` / `Page.bringToFront` —— 它们的作用恰好是把窗口顶到所有应用之上，是"抢屏幕"的成因而不是解法；而且对**操作系统级遮挡**（窗口被别的程序盖住）毫无帮助。
-- `--window-position=-30000,-30000` 把窗口挪出屏幕 —— Windows 会把越界坐标夹回屏内，等于没挪。
 
-配合 `--disable-backgrounding-occluded-windows`、`--disable-features=CalculateNativeWinOcclusion`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling`、`--autoplay-policy=no-user-gesture-required`。
+- `Target.activateTarget` / `Page.bringToFront` —— 它们的作用恰好是把窗口顶到所有应用之上，是"抢屏幕"的成因而不是解法；对操作系统级遮挡毫无帮助。
+- `--window-position=-30000,-30000` 把窗口挪出屏幕 —— Windows 会把越界坐标夹回屏内，等于没挪；而且挪出去之后页面会被判成 `hidden`，可信输入反而送不进渲染进程。
+
+真正有效的是这几个启动参数：`--disable-backgrounding-occluded-windows`、`--disable-features=CalculateNativeWinOcclusion`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling`，headless 时再加 `--autoplay-policy=no-user-gesture-required`。
 
 **可见性必须读原生 getter**，因为脚本自己伪造了 `document.visibilityState`：
 
@@ -100,112 +118,124 @@ s.vid === prev && lastT >= s.d - 30 && s.t < lastT - 10
 Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState').get.call(document)
 ```
 
-同理，`emulateFocusEmulationEnabled` 会把可见性实验仿真掉，得到"假绿"的结论，做可见性相关实验时必须关掉。
+同理，`Emulation.setFocusEmulationEnabled` 会把可见性仿真掉，得到"假绿"的结论，做可见性实验时必须关掉。
 
-### 6. `Page.addScriptToEvaluateOnNewDocument` 的两个坑
+### 7. 后台标签被 Chrome 挂起，脚本救不了
 
-- 它**只在当前 CDP 会话内有效**，进程退出即失效 —— 所以注入脚本的守护进程必须常驻；
-- 它**只作用于下一个文档** —— 复用已加载的标签页时必须 `Page.reload` 才生效。
+Chrome 只给**正在发声**的标签豁免定时器节流与内存节省挂起。纯静音的视频会被当后台处理，这时页面里的脚本自己也被冻住——任何续播逻辑都跑不到。所以面板提供「微声保活」（不静音、音量 0.02）。另外，屏幕外的窗口 = native hidden，此时 CDP 的 `Input.*` 事件不会送进渲染进程，做输入类实验必须先把窗口挪回屏内。
 
-### 7. 媒体域名与课程结构不同源
+### 8. 媒体域名与课程结构不同源
 
 视频实际走 `prod.dsep.chonggsk.com/dsep/res/video/<courseId>/<videoId>.mp4?e=<过期戳>&token=<签名>`，是签名直链。签名串不进仓库、不打日志。
 
 ---
 
-## 三、目录
+## 三、答题接口链路
 
-| 路径 | 作用 |
-| --- | --- |
-| `runner.mjs` | 主程序：起 headless Chrome、独占标签页、按关卡顺序播完全部视频、落本地状态、跨关卡对账 |
-| `verify.mjs` | 只读核验，输出平台侧完成度 |
-| `.cdp/records.mjs` | 五门课账目对照，一条命令看全 |
-| `.cdp/supervise.mjs` `.cdp/queue.mjs` | 守护 + 排队，多门课串跑 |
-| `.cdp/cdp.mjs` | 最小 CDP 客户端（`WebSocket` + 自增 id + `pend` 表） |
-| `.cdp/mute-unit-test.html` | 静音/倍速归属逻辑的回归夹具（8 断言） |
-| `.cdp/verify-rate.mjs` `.cdp/watch-rate.mjs` | 倍速实测：时间序列采样，验证真实倍率 |
-| `exercises.mjs` `answer.mjs` `export-exercises.mjs` | 练习题库读取与作答（见下节，当前被平台侧故障挡住） |
-| `hailang-background-play.user.js` | 油猴脚本，独立可用 |
-
-`.cdp/` 下另有一百多个一次性探针脚本，是上面每条结论的取证现场，保留是因为**它们的失败同样是信息**（比如 `why-nocredit.mjs`、`cold-1x-test.mjs`、`click-vs-navigate.mjs`、`test-1x-credit.mjs` 各自排除掉一个假设）。
-
-## 四、自动答题（`answer-exercises.mjs`）
-
-```bash
-node answer-exercises.mjs --course 前端框架开发技术            # 只读：统计能答多少
-node answer-exercises.mjs --course 前端框架开发技术 --apply    # 真正提交
-node answer-exercises.mjs --course X --unit 使用生命周期函数 --apply   # 只做一个单元
-```
-
-**先前记的「`exercisesList`/`createList` 稳定 501 是平台故障」是错的，这里更正**：501 的内容是
-`{"code":501,"msg":"操作ID不能为空"}` —— 是**我自己漏传了 `operationId`**。平台没坏。
-
-章节习题的完整链路（每步都实测 200）：
+### 章节习题（`answer-exercises.mjs`）
 
 ```
 1 POST study/studyRecordExercises/exerciseBarrier              {studentCourseId, unitId}
 2 POST study/courseCatalogExercisesConfig/checkUpdateExercises {studentCourseId, courseId, majorId, unitId, version}
-       -> data.operationId  (uuid，有效期 30 秒)
+       -> data.operationId  (uuid，有效期约 30 秒)
 3 POST study/studyRecordExercises/exercisesList                {...}   -> 题目 + referenceAnswer
 4 POST study/studyRecordExercises/createExercisesList          {poList, operationId, ...}   写入答案
 5 POST study/studyRecordExercises/createList                   {poList, operationId, ...}   「提交练习」
 6 POST study/studyRecordExercises/clearStudentUnit             {studentCourseId, unitId}    「返回/关闭」
 ```
 
-**最容易踩的一条**：平台**同一时刻只允许一个"打开中"的章节习题会话**。`exercisesList` 本身就占这个名额，
-没释放的话，对其它任何单元的调用都会返回
+三条硬规矩，都是实测出来的：
 
-```
-code:502  检测到您有正在进行中的【XX】章节习题，请前往…「提交练习」或点击页面内的「返回/关闭」退出
-```
+- **不领 `operationId` 就提交会返回 `code:501 操作ID不能为空`** —— 这是漏传参数，不是平台故障。
+- **平台同一时刻只允许一个"打开中"的章节习题会话**。`exercisesList` 本身就占这个名额，没释放的话其它单元的调用全回 `code:502 检测到您有正在进行中的【XX】章节习题…`。所以第 6 步是**必须逐单元串行**的收尾，少了它一门 26 单元的课会被误判成"只有 1 个单元有题"。
+- **回读前必须再 `exerciseBarrier` 一次**，否则多数单元返回空列表，会把成功的提交读成失败。
 
-所以第 6 步不是可选的清理，而是**必须逐单元串行执行**的收尾 —— 少了它，一门 26 单元 67 道题的课会被误判成"只有 1 个单元有题"。
-
-**三种客观题的参考答案格式各不相同**，判据必须分开写：
+四种题型的参考答案格式不同，判据必须分开写：
 
 | 题型 | `referenceAnswer` | `optionVos` | 双证方式 |
 | --- | --- | --- | --- |
 | 1 单选 | 一个选项 id | 恰有一个 `answerFlag==1` | 两者必须完全相等 |
 | 2 多选 | 选项 id 用 `|` 连接 | 多个 `answerFlag==1` | 集合排序后必须相等 |
 | 3 判断 | 字面量 `"0"` / `"1"` | **空数组** | 无第二方证据，只校验取值域 |
-| 7 编程 | 一段 HTML 高亮代码 | 空 | **跳过，不代做** |
+| 7 编程 | 一段 HTML 高亮代码 | 空 | 交代码压缩包，见 `answer-codeq.mjs` |
 
-只提交「客观题 + 判据通过 + 此前未作答」的题，因此重复运行是幂等的（实测跑两次，第二次显示"可提交 0 道"）。
-当前状态：该课 67 道中 5 道已答、53 道可自动作答、9 道编程题跳过。
+只提交「客观题 + 判据通过 + 此前未作答」的题，所以重复运行是幂等的（跑两次，第二次"可提交 0 道"）。
 
-`exercises.mjs` / `answer.mjs` / `export-exercises.mjs` 是这条线上更早的尝试，接口族判断有错，保留作取证痕迹。
+### 知识练习（`answer-knowledge.mjs`）
 
-## 五、枚举与核验（2026-10-12 补）
+挂在视频分段知识点上，枚举链路：`progressDetails` → 视频 → `videoSegmentKnowledgeTimeRanges[].id` → `studyKnowledgeExerciseRecord/check` → `exercisesList`。提交走 `studyKnowledgeExerciseSummaryRecord/createList`，其中 **`segmentKnowledgeId` 必须放在请求体外层**（一组一个分段）；塞进 `poList` 元素里会被静默忽略，服务端报 `Field 'segment_knowledge_id' doesn't have a default value`。
 
-- **两类课程的取单元接口不一样**。闯关制走 `listCourseBarrier`+`listCatalogBarrier`；
-  非闯关制（如框架程序设计（Java））`listCourseBarrier` 返回 **0 个关卡**，必须回落到
-  `POST study/courseCatalog/tree` 按 `childList` 里 `videoCount>0` 的节点取单元。
-  两个答题脚本都补了这个兜底。**在补之前，Java 的 138 道题对接答逻辑完全不可见**，
-  于是被误读成"这门课没题"。
-- **报数必须说明口径**。`exercisesList` 逐单元累加得到的是*提交槽位*数，不是题目数：
-  Java 累加 276、去重后 138（同一道题被两个单元复用，138×2），而 138 正是 runner 打的
-  「练习清单=138 道」。另外四门课去重后与累加相等。
-- **接口回 200 不等于答案落库**。`--apply` 提交后会重新拉一次 `exercisesList`，
-  数服务端自己的 `submitAnswer`，逐单元打 `已答 before → after（期望 ≥…）`，
-  不达标以退出码 4 结束。
-- 只读盘点器：`node .cdp/inventory.mjs <课程名关键词>`，给单元数、题目数（含去重）、
-  已答、可自动作答、按题型分布，全程不领 `operationId`、不提交。
-- 刷课的取数同理：`listCourseBarrier` 会漏掉没有子节点的顶层关卡（实测整棵树 41 条、
-  关卡接口只给 40 条，缺的是「课程介绍」183 秒），runner 现在用 `progressDetails`
-  权威树补齐，并加了一道 `haveTime/sumTime` 课程级时长闸。
+### 设计题与编程题（`answer-design.mjs` / `answer-codeq.mjs`）
 
-## 六、长任务怎么起
+产物目录约定 `design-output/<题目id>/`：`答案.txt` 进 `submitAnswer`，其余文件打成 `<qid>.zip` 走 `POST /gateway/file/studyRecordExercises/uploadCodeZip` 换 `fileId` 进 `submitFile`。按内容哈希复用 `fileId`，避免重复堆孤儿压缩包。
 
-```bash
-powershell -NoProfile -File .cdp/start-queue.ps1        # 脱离会话启动队列
-node .cdp/queue.mjs --dry                               # 只看判定，不启动播放
-powershell -NoProfile -File .cdp/stop-jobs.ps1          # 停
-```
-用 agent 的后台 shell 直接起 `queue.mjs` 会随会话结束被一起清掉（实测跑到一半整条消失，
-连专用 profile 的 Chrome 都不在），所以必须走 `Start-Process`。
+**服务端自己拥有的字段绝不能硬编码**：`recordId` 填错会让新提交被旧记录遮住，`updateCount` 填错会被判 `code:917 题目已更新，请重新做题`。两处都是踩过、已经改成从题目行原样回填的。
 
-## 七、边界
+### 两档授权，分开开关
 
-- 编程题要在本人名下提交，需要本人明确点头，工具默认只做预览；`--apply` 是显式开关。
-- 协议勾选一类的同意动作交回本人完成。
-- 仓库为私有；日志、运行状态、截图（含姓名/学号）、接口响应转储（含平台下发的参考答案）都在 `.gitignore` 里，不入库。
+- **回填平台下发的参考答案**（`--ref-answer`、`answer-codeq` 默认行为）：内容是平台给的，性质轻。
+- **把生成的内容以账号主人名义提交**（`design-output/` 自造产物、`essay-output/` 自写简答、`--with-authored` 手写工程）：性质重，必须显式开启，默认不做。
+
+### 核验
+
+`--apply` 之后一定回读：重新拉一次列表，数**服务端自己的** `submitAnswer` / `submitFile` / `submitTime`，逐单元打 `已答 before → after（期望 ≥…）`，不达标以退出码 4 结束。回读判据不许读"我刚写进去的那个字段"——自己填的值也算 truthy，会把没落库的报成落库的。
+
+---
+
+## 四、目录
+
+| 路径 | 作用 |
+| --- | --- |
+| `hailang-panel.user.js` | 油猴任务面板（播放 + 做客观题），独立可用 |
+| `hailang-background-play.user.js` | 极简油猴脚本：后台续播 + 静音 + 2 倍速 |
+| `runner.mjs` | 主程序：起 headless Chrome、按关卡顺序播完、落本地状态、跨关卡对账 |
+| `verify.mjs` | 只读核验，输出平台侧完成度 |
+| `answer-exercises.mjs` / `answer-knowledge.mjs` / `answer-codeq.mjs` / `answer-design.mjs` | 四层答题 |
+| `state-path.mjs` | 状态文件按学号拆分：`.runner-state-<学号>.json`（不入库） |
+| `zip-store.mjs` | 无依赖 ZIP 打包（store 模式） |
+| `.cdp/inventory.mjs` | 只读盘点器：单元数、题目数（含去重）、已答、可自动作答、题型分布 |
+| `.cdp/cdp.mjs` | 最小 CDP 客户端（`WebSocket` + 自增 id + `pend` 表） |
+| `.cdp/launch-visible.ps1` / `launch-headless.ps1` / `start-keeper.ps1` / `stop-jobs.ps1` | 起实例、起常驻注入器、停车 |
+| `.cdp/inject-keeper.mjs` | 给没装 Tampermonkey 的实例持续注入面板；带锁文件、服务端权威判据、DONE/STALL/ABORT 三种停车 |
+| `.cdp/mute-unit-test.html` | 静音/倍速归属逻辑的回归夹具（8 断言） |
+| `.cdp/*.mjs` 其余 | 一次性取证探针。保留是因为**它们的失败同样是信息**：`panel-resume.mjs`、`trusted-vs-synthetic.mjs` 是两轮**无效测量**（窗口在屏幕外导致可信输入没送达），文件头写明"别拿这种环境下的 +0 当结论"；`panel-resume2.mjs`、`hb-resp.mjs`、`per-video-have.mjs` 才是把错误结论查穿的那几个 |
+| `exercises.mjs` / `answer.mjs` / `export-exercises.mjs` | 答题链路更早的尝试，接口族判断有错，保留作取证痕迹 |
+
+---
+
+## 五、常见误判清单（都是我自己犯过的）
+
+| 现象 | 真实原因 |
+| --- | --- |
+| "脚本代点不计时长" | 事件打在了被透明控件盖住的按钮上，没打在 `elementFromPoint` 命中的元素上 |
+| 某门课反复量到 `haveTime +0` | 样本那条视频早已记满 |
+| "这门课没题" | 取单元的接口走错了分支：非闯关制课 `listCourseBarrier` 返回空，必须回落 `courseCatalog/tree` |
+| 关卡接口算出的缺口偏小 | 它漏掉没有子节点的顶层关卡（实测整棵树 41 条、关卡接口只给 40 条，缺的是「课程介绍」） |
+| 提交返回 501 | 自己漏传 `operationId`，不是平台故障 |
+| 只有 1 个单元有题 | 没逐单元 `clearStudentUnit`，后面的单元全被 502 挡住 |
+| 界面显示 100% 但时长有缺口 | `learned` 百分比最不可信，要用原始秒数 |
+| 可信点击"没反应" | 窗口在屏幕外 → 页面 native hidden → CDP 输入不进渲染进程 |
+| 报"服务端拒绝了我" | 先证明我自己那发请求的 headers / body 齐全，再怪服务端 |
+
+---
+
+## 六、环境变量
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `CDP_BASE` / `--cdp` | `http://127.0.0.1:9224` | DevTools 端口 |
+| `HAILANG_HEADLESS=0` | headless | 改成有窗口模式（调试用） |
+| `HAILANG_RATE=1` | 2 | 注入前覆盖默认倍速 |
+| `KEEP_WINDOW_ONSCREEN=1` | 挪到屏幕外 | 让窗口留在屏内（可见性实验必须开） |
+| `ALLOW_FOREGROUND=1` | 不抢屏幕 | 允许在媒体加载不出来时把窗口提到前台 |
+
+---
+
+## 七、隐私处理
+
+公开仓库前已做和待做的处理：
+
+- **不入库**（`.gitignore` 已挡）：`*.png` 截图（可能含姓名/学号）、`*.log` 运行日志、`.runner-state*.json`（按学号拆的学习进度状态）、`.cdp/knowledge-answers/` 与 `.cdp/design/`（含平台下发参考答案的接口转储）、注入器锁文件、`design-output/**/target/` 编译产物。
+- 代码里的账号标识一律从 `localStorage.userInfo2` 运行时读取，不含硬编码的姓名或学号。
+- 登录令牌不出现在源码、日志和本文档里。
+- 本文档中的课程名、题号、时长数字均为公开课件内容或已去除身份指向的实测值。
