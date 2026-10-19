@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.5.3
+// @version      0.5.4
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切窗口/切标签被停会自动接手，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -11,6 +11,13 @@
 // ==/UserScript==
 
 /*
+ * v0.5.4 修「勾了『刷完自动做题』，换一条视频勾就自己没了」。
+ *   成因：跳下一条视频是整页重载，面板重新注入时 G 全部回到默认值，而三个开关
+ *   （自动起播 / 刷完自动做题 / 声音档）只存在内存里，HTML 里还是写死的 checked。
+ *   声音档是同一类问题里更伤的一个：切到「微声保活」后一换视频就退回静音，
+ *   而静音标签没有 Chrome 的节流与挂起豁免 —— 等于后台保活被这次重载悄悄关掉。
+ *   现在三个开关落 localStorage.kg-prefs，渲染时按存下来的值画勾、按钮文字也按它显示。
+ *
  * v0.5.3 修「很多视频差 1 秒没看完，要人工拖到最后看一眼才算完成」。
  *   成因就在 v0.4.1 那句片尾判据上：我写的是 currentTime >= duration - 1.5 就跳下一条，
  *   等于**每条视频都被面板提前 1.5 秒拽走**，最后一次上报落在结尾前 1 秒左右 ——
@@ -109,10 +116,16 @@
   // 凡是判断"现在这一页到底是什么页"的地方，都要重新读 location，别用加载时算好的常量。
   const onStudy = () => /\/stu\/pages\/MyCourse\/Study/.test(location.pathname);
   const JOB_KEY = 'kg-job';
+  // 三个用户开关（自动起播 / 刷完自动做题 / 声音档）必须落盘：跳下一条视频是整页重载，
+  // 内存里的 G 每次都会被重置回默认值 —— 实测勾了「刷完自动做题」，换一条视频勾就没了。
+  const PREF_KEY = 'kg-prefs';
+  const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}'); } catch (e) { return {}; } };
+  const PREF0 = loadPrefs();
+  const savePref = (k, v) => { const p = loadPrefs(); p[k] = v; localStorage.setItem(PREF_KEY, JSON.stringify(p)); };
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.5.3' };
+  window.__kgPanel = { version: '0.5.4' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -120,8 +133,9 @@
   };
 
   const G = {
-    list: [], queue: [], cur: null, beats: 0, monitor: 0, mode: 'mute', autoStart: true,
-    running: false, baseHave: 0, log: [], waiting: false, late: 0, answerAfter: false, answered: 0, answering: false,
+    list: [], queue: [], cur: null, beats: 0, monitor: 0, mode: PREF0.mode || 'mute',
+    autoStart: PREF0.autoStart !== false,
+    running: false, baseHave: 0, log: [], waiting: false, late: 0, answerAfter: !!PREF0.answerAfter, answered: 0, answering: false,
     ansState: 'idle', ansDone: 0, ansMsg: null, ansLast: null, ansAt: 0,
   };
   window.__kgPanel.G = G;   // 给自检脚本读数用（面板自己不依赖它）
@@ -680,8 +694,8 @@
     p.style.cssText = 'position:fixed;right:14px;bottom:14px;width:352px;max-height:74vh;overflow:auto;z-index:2147483000;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 6px 24px rgba(15,23,42,.16);font:13px/1.5 -apple-system,"Microsoft YaHei",sans-serif;color:#0f172a';
     p.innerHTML = `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#1e3a8a;color:#fff;position:sticky;top:0">
-        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.3</span></b>
-        <button id="kg-sound" title="静音 / 微声保活 / 开 三态循环：要挂后台请选微声保活" style="cursor:pointer;font-size:11px">声音：静音</button>
+        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.4</span></b>
+        <button id="kg-sound" title="静音 / 微声保活 / 开 三态循环：要挂后台请选微声保活" style="cursor:pointer;font-size:11px">声音：${modeLabel()}</button>
         <button id="kg-min" style="cursor:pointer">—</button>
       </div>
       <div id="kg-body" style="padding:8px 10px">
@@ -689,10 +703,10 @@
           <button id="kg-scan" style="flex:1;cursor:pointer">刷新课程与缺口</button>
           <button id="kg-play" style="flex:1;cursor:pointer">立即起播</button>
         </div>
-        <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#334155;margin-bottom:4px"><input type="checkbox" id="kg-auto" checked>停着就自己起播（不用你点播放键）</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#334155;margin-bottom:4px"><input type="checkbox" id="kg-auto"${G.autoStart ? ' checked' : ''}>停着就自己起播（不用你点播放键）</label>
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
           <button id="kg-ans" style="flex:1;cursor:pointer;background:#7c3aed;color:#fff;border:0;padding:7px;border-radius:6px">做这门课的题（客观题）</button>
-          <label style="font-size:11.5px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="kg-ansauto">刷完自动做题</label>
+          <label style="font-size:11.5px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="kg-ansauto"${G.answerAfter ? ' checked' : ''}>刷完自动做题</label>
         </div>
         <div id="kg-ansstat" style="font-size:11.5px;color:#475569;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:6px;padding:4px 6px;margin-bottom:6px">做题结果会显示在这里，不用翻日志</div>
         <div style="font-size:11.5px;color:#64748b;line-height:1.45;margin-bottom:4px">分工：排队跳转、<b>起播</b>、2 倍速、声音、切窗口接手、<b>做客观题</b>都由面板做。起播用的是打在"真正会被点到的元素"上的合成手势 —— 实测这样服务端照记：60 秒里 haveTime +90 秒（2 倍速看满 60 秒），上报接口全部 HTTP 200。做题只做单选/多选/判断，且平台下发的参考答案必须与选项双证一致；简答题、设计题、编程题要产物或要人写，面板不碰。</div>
@@ -703,7 +717,7 @@
           <button id="kg-stop" style="cursor:pointer">停</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.3</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.4</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
@@ -714,6 +728,7 @@
     p.querySelector('#kg-sound').onclick = (e) => {
       const i = MODES.map((m) => m[0]).indexOf(G.mode);
       G.mode = MODES[(i + 1) % MODES.length][0];
+      savePref('mode', G.mode);
       e.target.textContent = '声音：' + modeLabel();
       for (const v of document.querySelectorAll('video')) { applyMode(v); v.__kgMode = G.mode; }
       say(G.mode === 'whisper' ? '微声保活：音量 0.02，几乎听不见，但 Chrome 会把它当"正在发声的标签"，后台不节流、不挂起' : '声音：' + modeLabel() + '（倍速保持 2）');
@@ -722,11 +737,13 @@
     p.querySelector('#kg-ans').onclick = () => { const job = loadJob(); doAnswer(G.cur || (job && job.queue[job.i]) || null); };
     p.querySelector('#kg-ansauto').onchange = (e) => {
       G.answerAfter = e.target.checked;
+      savePref('answerAfter', G.answerAfter);
       say(G.answerAfter ? '已开：每门课刷完时长后接着做这门课的客观题（章节习题 + 知识练习）' : '已关：只刷时长，不做题');
     };
     p.querySelector('#kg-play').onclick = playNow;
     p.querySelector('#kg-auto').onchange = (e) => {
       G.autoStart = e.target.checked;
+      savePref('autoStart', G.autoStart);
       say(G.autoStart ? '已开自动起播：视频停着且不是你亲手停的，面板自己发起播手势' : '已关自动起播：只在你点「立即起播」或亲手点播放键时起播');
     };
     p.querySelector('#kg-run').onclick = async () => {
@@ -823,7 +840,7 @@
     }, 3000);
     const job = loadJob();
     if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，面板会自己起播接着走`); }
-    say('面板 v0.5.3 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
+    say('面板 v0.5.4 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗 + 开关记忆）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
     scan();
   }
 

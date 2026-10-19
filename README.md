@@ -18,7 +18,7 @@
 
 ### A. 油猴面板（推荐给同学，不需要 Node）
 
-`hailang-panel.user.js`（当前 v0.5.3）。装进 Tampermonkey 后，在学习页右下角出现面板：
+`hailang-panel.user.js`（当前 v0.5.4）。装进 Tampermonkey 后，在学习页右下角出现面板：
 
 | 能力 | 说明 |
 | --- | --- |
@@ -29,6 +29,7 @@
 | 切窗口接手 | 站点播放器失焦会自己 `pause`，面板在同一个事件里同步接手 |
 | 片尾自己跳下一条 | 站点到片尾会弹「有习题待完成」并停住，面板关掉弹窗后跳下一条 |
 | 做客观题 | 章节习题 + 知识练习，只交「平台下发参考答案 + 与选项双证一致」的题 |
+| 开关记忆 | 自动起播 / 刷完自动做题 / 声音档存 `localStorage.kg-prefs`；跳下一条视频是整页重载，不存就会每次换视频都退回默认（实测过这个坑） |
 | 自证仪表 | 页脚：心跳 / 监控 / 接手 / 暂停事件 / 定时器最大迟到，用来分清责任 |
 
 安装：Tampermonkey → 新建脚本 → 粘贴文件全文 → 保存 → 刷新学习页；标题栏显示版本号才算装上。
@@ -220,6 +221,7 @@ Chrome 只给**正在发声**的标签豁免定时器节流与内存节省挂起
 | `.cdp/launch-visible.ps1` / `launch-headless.ps1` / `start-keeper.ps1` / `stop-jobs.ps1` | 起实例、起常驻注入器、停车 |
 | `.cdp/inject-keeper.mjs` | 给没装 Tampermonkey 的实例持续注入面板；带锁文件、服务端权威判据、DONE/STALL/ABORT 三种停车 |
 | `.cdp/mute-unit-test.html` | 静音/倍速归属逻辑的回归夹具（8 断言） |
+| `.cdp/test-prefs-persist.mjs` | 开关记忆的端到端回归（10 断言）：自带临时 profile 与本地夹具站点，跑完自己收 |
 | `.cdp/*.mjs` 其余 | 一次性取证探针。保留是因为**它们的失败同样是信息**：`panel-resume.mjs`、`trusted-vs-synthetic.mjs` 是两轮**无效测量**（窗口在屏幕外导致可信输入没送达），文件头写明"别拿这种环境下的 +0 当结论"；`panel-resume2.mjs`、`hb-resp.mjs`、`per-video-have.mjs` 才是把错误结论查穿的那几个 |
 | `exercises.mjs` / `answer.mjs` / `export-exercises.mjs` | 答题链路更早的尝试，接口族判断有错，保留作取证痕迹 |
 
