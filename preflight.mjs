@@ -17,7 +17,7 @@
 // 不调 createExercisesList / createList，所以不会写任何答案。--no-exercises 连会话都不碰。
 //
 // 前置：已有一个带 study.cqie.edu.cn 标签页的、开了 --remote-debugging-port 的 Chrome。
-// 本机启动方式见 .cdp/launch-visible.ps1，注意那个脚本写死了本机的用户目录和 Chrome 路径。
+// 本机启动方式见 .cdp/launch-visible.ps1（用户目录与 Chrome 路径都从 $env: 取，换机器不用改）。
 //
 // 退出码：0 跑完且无未知项 / 1 环境或登录态问题，没跑起来 / 2 登录态被顶掉 / 3 跑完了但有需人判的未知项
 // （与 answer-*.mjs 的 4 =「服务端回读不达标」区分开，preflight 从不写入所以不用 4）

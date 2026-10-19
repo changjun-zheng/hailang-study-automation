@@ -39,6 +39,7 @@
 
 ```bash
 node runner.mjs --course <课程名>            # 起 headless Chrome，按关卡顺序播完全部视频
+node preflight.mjs                           # 只读自检：这个账号的课能不能被现有分支处理
 node verify.mjs --course <课程名>            # 只读核验：打印平台自己认的账
 node .cdp/inventory.mjs <课程名>             # 只读盘点：单元数/题目数/已答/可自动作答/题型分布
 node answer-exercises.mjs --course <课程名>          # 只读统计
@@ -49,6 +50,27 @@ node answer-design.mjs --course <课程名> --apply     # 设计题（需要本�
 ```
 
 所有脚本都支持 `--cdp http://127.0.0.1:<端口>`，默认 `9224`。多门课串跑用 `.cdp/supervise.mjs` + `.cdp/queue.mjs`，停车用 `powershell -File .cdp/stop-jobs.ps1`。
+
+### 换一门没见过的课、换一个账号
+
+课程**不是白名单**。每个脚本都用当前登录账号的 `pagedMyCourse` 现取课程清单，再从课程对象上取 `id / studentCourseId / version`，`majorId` 与学号从 `userInfo2` 取，所以任何一门能在这个账号里列出来的课都可以直接进。两处例外要自己改：
+
+- `.cdp/queue.mjs` 里写死了五门课的串跑队列（那是当前学期我自己的清单），`.cdp/records.mjs` 是同一批课的对账表；
+- `runner.mjs` 用**课程全名精确匹配**（`c.name === COURSE`），名字里一个空格或全角括号不同就报「没找到课程」并把可选清单打出来；其余脚本用子串匹配。
+
+先跑 `node preflight.mjs`，它专门回答换账号后的四个未知项，退出码 3 表示"跑完了但有需要人判的项"：
+
+| 未知项 | 现有分支的边界 |
+| --- | --- |
+| `version` 从哪来 | 优先取课程对象自己的值；取不到时兜底 `BK_RJGC_2024`，这是 2024 级软件工程的培养方案版本号，换专业/换年级不成立 |
+| 课程结构 | 闯关制走 `listCourseBarrier`，返回 0 个关卡时回落 `courseCatalog/tree` 按 `videoCount>0` 取单元；两条路都漏的第四种结构，它会报"这门课一个单元都没枚举到"而不是静当成没内容 |
+| 题型 | 只实现了 1 单选 / 2 多选 / 3 判断（直接搬参考答案）、5 简答 / 6 问答（要 `--subjective` 才交）、7 编程与 8 设计（要本地产物，走 `answer-codeq` / `answer-design`）。出现集合外的题型编号，它标 `[未实现]` 并计入未知项 |
+| 参考答案覆盖率 | 逐题型统计 `referenceAnswer` 有没有，把"能搬的"和"必须自己造的"分开；没有参考答案的题，脚本一律不交 |
+
+两个已知判据缺口：`pagedMyCourse` 分页只取前 50 门；分段关卡制的课（实测《前端框架开发技术》）目录层每条视频的 `haveTime` 恒为 0，这类课只能退回课程级 `myCourseDetails.haveTime/sumTime` 判完成，不能按条判。
+
+`.cdp/` 下的面板探针脚本（`panel-*.mjs`、`test-*.mjs`）现在按相对路径读脚本全文，**要在仓库根目录下执行**。
+
 
 ---
 
