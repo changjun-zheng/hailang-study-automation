@@ -23,7 +23,7 @@ const SNAP = `JSON.stringify((()=>{const G=window.__kgPanel&&window.__kgPanel.G;
   结果:((document.getElementById('kg-ansstat')||{}).textContent||'-').slice(0,120),
   进行中:G?!!G.answering:null,已交:G?G.ansDone:null,状态:G?G.ansState:null}})())`;
 
-const WANT = (await import('node:fs')).readFileSync('D:/Workspace/Code_Projects/hailang-AutoCourse/hailang-panel.user.js', 'utf8').match(/@version\s+(\S+)/)[1];
+const WANT = (await import('node:fs')).readFileSync('hailang-panel.user.js', 'utf8').match(/@version\s+(\S+)/)[1];
 console.log(`等注入器把 v${WANT} 换上…`);
 let v = '';
 for (let i = 0; i < 12; i++) {

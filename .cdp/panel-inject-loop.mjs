@@ -5,7 +5,7 @@
 //   node .cdp/panel-inject-loop.mjs [秒数]
 import fs from 'node:fs';
 const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9226';
-const SRC = 'D:/Workspace/Code_Projects/hailang-AutoCourse/hailang-panel.user.js';
+const SRC = 'hailang-panel.user.js';
 const SECS = Number(process.argv[2] || 300);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const toSec = (t) => String(t || '0:0:0').split(':').reduce((a, p) => a * 60 + (parseInt(p, 10) || 0), 0);

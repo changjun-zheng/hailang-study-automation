@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
-const ROOT = 'D:/Workspace/Code_Projects/hailang-AutoCourse';
+const ROOT = '.';
 const NEW_SRC = fs.readFileSync(ROOT + '/hailang-panel.user.js', 'utf8');
 const OLD_SRC = execFileSync('git', ['show', 'HEAD:hailang-panel.user.js'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 4e6 });
 const tabs = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page');

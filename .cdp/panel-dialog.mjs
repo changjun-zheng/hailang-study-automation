@@ -5,7 +5,7 @@
 //   node .cdp/panel-dialog.mjs
 const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9225';
 const fs = await import('node:fs');
-const SRC = 'D:/Workspace/Code_Projects/hailang-AutoCourse/hailang-panel.user.js';
+const SRC = 'hailang-panel.user.js';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tabs = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page' && (t.url || '').includes('/MyCourse/Study'));
 if (!tabs.length) { console.error('9225 上没有学习页'); process.exit(1); }

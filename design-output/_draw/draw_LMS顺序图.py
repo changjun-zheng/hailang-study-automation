@@ -1,8 +1,8 @@
-import sys
-sys.path.insert(0, r"C:\Users\ME\.qoder-cn\skills\draw-tech-diagram\scripts")
+import os, sys
+sys.path.insert(0, os.path.expanduser(r"~\.qoder-cn\skills\draw-tech-diagram\scripts"))
 from draw_scaffold import *
 
-OUT = r"D:/Workspace/Code_Projects/hailang-AutoCourse/design-output/7074dbf6d745833dde822f8c73671e56"
+OUT = r"design-output/7074dbf6d745833dde822f8c73671e56"
 MS, STEP, Y0, SHIFT = 12, 46, 246, 30
 W, H = 1440, 1340
 

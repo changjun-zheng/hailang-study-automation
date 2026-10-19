@@ -65,7 +65,7 @@ await bask('Browser.setWindowBounds', { windowId: win.windowId, bounds: { left: 
 await send('Page.bringToFront');
 await sleep(3000);
 await evl(`(()=>{window.__kgBuilt=1;window.__kgPanel=null;const p=document.getElementById('kg-panel');if(p)p.remove();return 1})()`);
-await evl(fs.readFileSync('D:/Workspace/Code_Projects/hailang-AutoCourse/hailang-panel.user.js', 'utf8') + '\n;"ok"');
+await evl(fs.readFileSync('hailang-panel.user.js', 'utf8') + '\n;"ok"');
 await sleep(2500);
 
 const dump = (tag) => {

@@ -4,7 +4,7 @@
 //   node cdp.mjs --shot out.png [--match 关键字]
 //   node cdp.mjs --nav "<url>" [--match 关键字]
 //   node cdp.mjs --activate [--match 关键字]
-// 连的是本机 dedicated profile Chrome（user-data-dir=C:\Users\ME\.hailang-chrome-profile）
+// 连的是本机 dedicated profile Chrome（--user-data-dir 指向 <你的主目录>\.hailang-chrome-profile）
 const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9224';
 const arg = (n, d) => {
   const i = process.argv.indexOf(n);

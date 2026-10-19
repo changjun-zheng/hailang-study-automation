@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9226';
 const COURSE = process.argv[2] || '软件测试技术';
-const SRC = 'D:/Workspace/Code_Projects/hailang-AutoCourse/hailang-panel.user.js';
+const SRC = 'hailang-panel.user.js';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tabs = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page' && (t.url || '').includes('study.cqie.edu.cn'));
 if (!tabs.length) { console.error('没有 study 标签页'); process.exit(1); }
@@ -43,7 +43,7 @@ console.log(done ? '\n面板自己报完了。下面用 node 脚本独立复核�
 ws.close();
 if (done) {
   const { spawnSync } = await import('node:child_process');
-  const r = spawnSync('node', ['answer-exercises.mjs', '--cdp', BASE, '--course', COURSE], { cwd: 'D:/Workspace/Code_Projects/hailang-AutoCourse', encoding: 'utf8', timeout: 280000 });
+  const r = spawnSync('node', ['answer-exercises.mjs', '--cdp', BASE, '--course', COURSE], { cwd: '.', encoding: 'utf8', timeout: 280000 });
   console.log((r.stdout || '').split('\n').filter((x) => /课程「|已答|可提交|跳过|枚举行/.test(x)).slice(0, 6).join('\n'));
 }
 process.exit(0);

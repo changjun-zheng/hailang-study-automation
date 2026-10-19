@@ -1,8 +1,8 @@
 import os, sys
-sys.path.insert(0, r"C:\Users\ME\.qoder-cn\skills\draw-tech-diagram\scripts")
+sys.path.insert(0, os.path.expanduser(r"~\.qoder-cn\skills\draw-tech-diagram\scripts"))
 from draw_scaffold import *
 
-OUT = "D:/Workspace/Code_Projects/hailang-AutoCourse/diagrams"
+OUT = "diagrams"
 os.makedirs(OUT, exist_ok=True)
 W, H = 1440, 880
 

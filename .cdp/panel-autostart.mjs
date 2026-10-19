@@ -4,7 +4,7 @@
 // 期间页面会被 Chrome 判成 hidden、站点会自停，面板的接手负责把它拉回来 —— 这正是真实使用场景。
 //   node .cdp/panel-autostart.mjs
 const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9225';
-const SRC = 'D:/Workspace/Code_Projects/hailang-AutoCourse/hailang-panel.user.js';
+const SRC = 'hailang-panel.user.js';
 const fs = await import('node:fs');
 const toSec = (t) => String(t || '0:0:0').split(':').reduce((a, p) => a * 60 + (parseInt(p, 10) || 0), 0);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

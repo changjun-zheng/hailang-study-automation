@@ -9,7 +9,7 @@
 //   CDP_BASE=http://127.0.0.1:9224 node .cdp/panel-resume.mjs
 import fs from 'node:fs';
 const BASE = process.env.CDP_BASE || 'http://127.0.0.1:9225';
-const SRC = process.env.PANEL_SRC || 'D:/Workspace/Code_Projects/hailang-AutoCourse/hailang-panel.user.js';
+const SRC = process.env.PANEL_SRC || 'hailang-panel.user.js';
 const tabs = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page' && (t.url || '').includes('/MyCourse/Study'));
 if (!tabs.length) { console.error('没有学习页标签，先进到某条视频的学习页再测'); process.exit(1); }
 const tab = tabs[0];

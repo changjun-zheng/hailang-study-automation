@@ -1,5 +1,5 @@
-$chrome = "C:\Users\ME\AppData\Local\Google\Chrome\Application\chrome.exe"
-$profile = "C:\Users\ME\.hailang-chrome-profile"
+$chrome = "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+$profile = "$env:USERPROFILE\.hailang-chrome-profile"
 $args = @(
   '--headless=new',
   '--remote-debugging-port=9224',

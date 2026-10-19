@@ -1,8 +1,8 @@
 import sys
-sys.path.insert(0, r"C:\Users\ME\.qoder-cn\skills\draw-tech-diagram\scripts")
+sys.path.insert(0, os.path.expanduser(r"~\.qoder-cn\skills\draw-tech-diagram\scripts"))
 from draw_scaffold import *
 
-OUT = r"D:/Workspace/Code_Projects/hailang-AutoCourse/design-output/8272cf3bb598322a3b58891e0e6905ba"
+OUT = r"design-output/8272cf3bb598322a3b58891e0e6905ba"
 
 W, H = 1440, 1330
 c = Canvas(W, H)
