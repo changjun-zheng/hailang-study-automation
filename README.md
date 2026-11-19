@@ -272,7 +272,8 @@ Chrome 只给**正在发声**的标签豁免定时器节流与内存节省挂起
 | `.cdp/mute-unit-test.html` | 静音/倍速归属逻辑的回归夹具（8 断言） |
 | `.cdp/test-prefs-persist.mjs` | 开关记忆的端到端回归（11 断言）：自带临时 profile 与本地夹具站点，动态端口、按 profile 杀整棵 Chrome 进程树；版本号从面板脚本头读取 |
 | `.cdp/records.mjs` | 当前学期五门课的对账表（与队列同一批课） |
-| `.cdp/*.mjs` 其余 | 一次性取证探针。保留是因为**它们的失败同样是信息**：`panel-resume.mjs` 是 v0.3.2/0.3.3 的 A/B 与最小化窗口取证；`trusted-vs-synthetic.mjs` 的结论在运行时判定（合成事件打在 `elementFromPoint` 命中的元素上仍记账）；「窗口在屏幕外导致可信输入没送达」的归因写在 `panel-resume2.mjs` 文件头；`hb-resp.mjs`、`per-video-have.mjs` 才是把「+0」查穿的那几个 |
+| `.cdp/*.mjs` 其余 | 一次性取证探针，文件保持原位；按主题与结论的完整索引见 `archive/README.md`。保留是因为**它们的失败同样是信息**：`panel-resume.mjs` 是 v0.3.2/0.3.3 的 A/B 与最小化窗口取证；`trusted-vs-synthetic.mjs` 的结论在运行时判定（合成事件打在 `elementFromPoint` 命中的元素上仍记账）；「窗口在屏幕外导致可信输入没送达」的归因写在 `panel-resume2.mjs` 文件头；`hb-resp.mjs`、`per-video-have.mjs` 才是把「+0」查穿的那几个 |
+| `archive/README.md` | 探针归档索引：21 个工具脚本与约 260 个历史探针按主题分组，标明各自结论入口 |
 | `design-output/` / `essay-output/` / `diagrams/` | 设计题、简答、图表的本地产物（重授权，默认不提交；UML 图是 `.gitignore` 里 `*.png` 的唯一例外） |
 | `exercises.mjs` / `answer.mjs` / `export-exercises.mjs` | 答题链路更早的尝试，接口族判断有错，保留作取证痕迹 |
 
@@ -319,4 +320,6 @@ Chrome 只给**正在发声**的标签豁免定时器节流与内存节省挂起
 - 登录令牌不出现在源码、日志和本文档里。
 - 本文档中的课程名、题号、时长数字均为公开课件内容或已去除身份指向的实测值。
 
-**待人工确认的清理项**（涉及删除/移动，未自动执行）：`design-output/0d0456f4…/说明.md` 里的本机 JDK 路径、`design-output/_draw/draw_*.py` 里的本机工具链路径、`.cdp/logs/privacy-expressions.txt`（未跟踪，含姓名映射与本机用户名）、`.cdp/logs/publish2/`（完整嵌套 clone）。
+**已清理的本地未跟踪产物**（2026-11-19，只影响本机，不在仓库历史里）：`.cdp/logs/privacy-expressions.txt`、`.cdp/logs/publish2/`（含独立 `.git` 的嵌套 clone）、`.cdp/logs/pre-rewrite-*.bundle`（旧历史备份）、`%TEMP%\kg-prefs-*` 测试残留。
+
+**待人工确认的清理项**（涉及改写已跟踪文件，未自动执行）：`design-output/0d0456f4…/说明.md` 里的本机 JDK 路径 `D:\develop\Java\jdk-21`。`design-output/_draw/*.py` 已复查，不含本机路径。
