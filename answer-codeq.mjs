@@ -26,34 +26,36 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { buildZip } from './zip-store.mjs';
+import { connectCdp, fetchCourseList } from './runtime.mjs';
 
-const ps = (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.url && t.type === 'page');
+const ps = (await (await fetch(BASE + '/json/list', { signal: AbortSignal.timeout(10000) })).json()).filter((t) => t.url && t.type === 'page');
 const page = ps.find((t) => t.url.includes('study.cqie.edu.cn'));
 if (!page) { console.error('连不上 study.cqie.edu.cn 的标签页：先跑 .cdp/launch-visible.ps1 或 node runner.mjs'); process.exit(1); }
-const ws = new WebSocket(page.webSocketDebuggerUrl);
-await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
-let seq = 0; const pend = new Map();
-ws.onmessage = (e) => { const x = JSON.parse(e.data); if (x.id && pend.has(x.id)) { const p = pend.get(x.id); pend.delete(x.id); x.error ? p.rej(new Error(x.error.message)) : p.res(x.result); } };
-const send = (m, p = {}) => new Promise((res, rej) => { const id = ++seq; pend.set(id, { res, rej }); ws.send(JSON.stringify({ id, method: m, params: p })); });
-const evl = async (e) => { const r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) { console.error('页面执行出错：' + (r.exceptionDetails.exception?.description || '').slice(0, 240)); process.exit(1); } return r.result?.value; };
+// 统一走 runtime 的 CDP 客户端：请求有超时、断开时所有 pending 一起失败，页面挂住不会永久等待。
+const { ws, send } = await connectCdp(page.webSocketDebuggerUrl);
+const evl = async (e) => { const r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true }, 30 * 60 * 1000); if (r.exceptionDetails) { console.error('页面执行出错：' + (r.exceptionDetails.exception?.description || '').slice(0, 240)); process.exit(1); } return r.result?.value; };
 
 // 1) 列出这门课所有编程题及其平台下发的参考答案
 const list = JSON.parse(await evl(`(async()=>{
   const tok=localStorage.getItem('token2');
   if(!tok) return JSON.stringify({err:'这个浏览器里没有登录态（localStorage.token2 为空）'});
   const H={Authorization:tok,'Content-Type':'application/json'};
-  const P=(x,b)=>fetch(x[0]==='/'?x:'/gateway/study/'+x,{method:'POST',headers:H,body:JSON.stringify(b)}).then(r=>r.json()).catch(()=>({}));
-  const G=(x)=>fetch(x,{headers:H}).then(r=>r.json()).catch(()=>({}));
+  const P=(x,b)=>fetch(x[0]==='/'?x:'/gateway/study/'+x,{method:'POST',headers:H,body:JSON.stringify(b)}).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).catch(e=>{throw new Error('请求失败：'+(e&&e.message||e))});
+  const G=(x)=>fetch(x,{headers:H}).then(async r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).catch(e=>{throw new Error('请求失败：'+(e&&e.message||e))});
   const me=JSON.parse(localStorage.getItem('userInfo2')||'{}');
-  const cs=await P('/gateway/frequent/orgStudent/pagedMyCourse',{filters:{courseNature:null,name:'',schoolYear:'',studentId:String(me.id),term:'',courseFlag:0},pageIndex:1,pageSize:50});
-  const cl=(cs.data&&(cs.data.records||cs.data.list))||[];
+  // 课程列表必须翻页：超过 50 门时只读第一页会静默漏课。
+  const cs=await (${fetchCourseList.toString()})(P,{courseNature:null,name:'',schoolYear:'',studentId:String(me.id),term:'',courseFlag:0});
+  const cl=(cs.data&&cs.data.records)||[];
   const c=cl.find(x=>(x.name||'')===${JSON.stringify(COURSE)})||cl.find(x=>(x.name||'').includes(${JSON.stringify(COURSE)}));
   if(!c) return JSON.stringify({err:'没找到课程「'+${JSON.stringify(COURSE)}+'」，可选：'+cl.map(x=>x.name).join(' / ')});
+  // 缺少培养方案版本时停止，不能套用其他年级/专业的默认版本。
+  if(!c.version) return JSON.stringify({err:'课程「'+c.name+'」未返回培养方案版本，停止任务'});
   const sid=c.studentCourseId||c.id;
   const bs=await G('/gateway/system/orgStudent/listCourseBarrier?courseId='+c.id+'&majorId='+me.majorId+'&userId='+me.id+'&version='+c.version+'&studentCourseId='+sid);
   if(bs.code!==200) return JSON.stringify({err:'关卡列表 code='+bs.code+' '+(bs.msg||'')+'（会话可能被别处登录顶掉了）'});
-  const units=[];
+  const units=[]; const warns=[];
   for(const b of bs.data||[]){const ns=await G('/gateway/system/orgStudent/listCatalogBarrier?barrierId='+b.id+'&studentCourseId='+sid);
+    if(ns.code!==200) warns.push('关卡「'+(b.name||b.id)+'」目录 code='+ns.code+' '+(ns.msg||''));
     for(const n of ns.data||[]) if(n.videoId&&!units.some(x=>x.unitId===n.id)) units.push({unitId:n.id,name:n.catalogName,videoId:n.videoId})}
   // 非闯关制课程 listCourseBarrier 返空，只走上面这条路会一道编程题都枚举不到（Java 课实测 0 个关卡）。
   // 回落到学习页用的目录树，按 childList 里 videoCount>0 的节点取单元。
@@ -64,17 +66,26 @@ const list = JSON.parse(await evl(`(async()=>{
   }
   const out=[];
   for(const s of units){
+    try {
     await P('studyRecordExercises/exerciseBarrier',{studentCourseId:sid,unitId:s.unitId});
     const l=await P('studyRecordExercises/exercisesList',{studentCourseId:sid,courseId:c.id,majorId:me.majorId,unitId:s.unitId,version:c.version});
+    if(l.code!==200) warns.push((s.name||s.unitId)+': 习题列表 code='+l.code+' '+(l.msg||''));
     for(const q of (Array.isArray(l.data)?l.data:[])) if(q.questionType===7)
       // 编程题的"已作答"标记是 submitFile，不是 submitAnswer —— 提交时 submitAnswer 恒为 '[]'，
       // 用 !!submitAnswer 判会把空答案当成已答（实测把 7 报成 9）。
       out.push({unitId:s.unitId,unitName:s.name,qid:q.id,ref:q.referenceAnswer||'',answered:!!q.submitFile,submitFile:q.submitFile||null,recordId:q.recordId||null,uc:q.updateCount});
-    await P('studyRecordExercises/clearStudentUnit',{studentCourseId:sid,unitId:s.unitId});
+    } catch(e) { warns.push((s.name||s.unitId)+': '+((e&&e.message)||e)); }
+    finally { try { await P('studyRecordExercises/clearStudentUnit',{studentCourseId:sid,unitId:s.unitId}); } catch(e) { warns.push((s.name||s.unitId)+': 会话释放失败 '+((e&&e.message)||e)); } }
   }
-  return JSON.stringify({ok:true,course:c.name,cid:c.id,sid,me:{id:me.id,majorId:me.majorId},version:c.version,rows:out})
+  return JSON.stringify({ok:true,course:c.name,cid:c.id,sid,account:String(me.studyNumber||me.id),me:{id:me.id,majorId:me.majorId},version:c.version,rows:out,warns})
 })()`));
 if (list.err) { console.error(list.err); process.exit(1); }
+const warns = list.warns || [];
+if (warns.length) {
+  console.log(`! 枚举阶段有 ${warns.length} 处接口异常 —— 在这种情况下"没有编程题"这个结论不可信：`);
+  for (const w of warns.slice(0, 10)) console.log('  - ' + w);
+  if (warns.length > 10) console.log(`  …其余 ${warns.length - 10} 条略`);
+}
 
 // 2) 还原代码 + 判定平台到底给没给代码（给的是中文说明的不做）
 const toCode = (html) => String(html || '')
@@ -120,7 +131,7 @@ for (const r of picked) {
   if ((real || proj) && (REDO || !r.answered)) todo.push({ ...r, code, proj });
 }
 if (authoredSkipped) console.log(`\n（${authoredSkipped} 道按你的要求跳过：答案是我手写的工程，不是平台给的答案）`);
-if (!todo.length) { console.log('\n没有可做的编程题'); process.exit(0); }
+if (!todo.length) { console.log('\n没有可做的编程题'); process.exit(warns.length ? 4 : 0); }
 if (!APPLY) { console.log(`\n（dry-run：${todo.length} 道可以做，但没有上传也没有提交。加 --apply 才真做）`); process.exit(0); }
 
 // 3) 打成 zip（自己写 STORE 包，条目名保证正斜杠）
@@ -133,7 +144,8 @@ for (const q of todo) {
   // 4) 上传（按内容哈希缓存 fileId：提交失败重跑时不再往账号上堆孤儿压缩包）
   const CACHE = path.join(ROOT, '.cdp', 'codeq', 'upload-cache.json');
   let cache = {}; try { cache = JSON.parse(fs.readFileSync(CACHE, 'utf8')); } catch {}
-  const hash = createHash('sha256').update(bytes).digest('hex');
+  // 缓存必须按账号隔离：同一个 zip 在另一个账号下复用别人的 fileId 属于跨账号数据复用。
+  const hash = createHash('sha256').update(String(list.account || '') + '|').update(bytes).digest('hex');
   let fileId = cache[hash] && cache[hash].id;
   if (fileId) { console.log(`  复用已上传产物 ${q.unitName}: fileId=${String(fileId).slice(0, 12)}…`); }
   else {
@@ -162,9 +174,13 @@ for (const q of todo) {
     const l0=await P('studyRecordExercises/exercisesList',{studentCourseId:'${list.sid}',courseId:'${list.cid}',majorId:me.majorId,unitId:'${q.unitId}',version:'${list.version}'});
     const ck=await P('courseCatalogExercisesConfig/checkUpdateExercises',{studentCourseId:'${list.sid}',courseId:'${list.cid}',majorId:me.majorId,unitId:'${q.unitId}',version:'${list.version}'});
     const oid=(ck.data&&(ck.data.operationId||ck.data.id))||'';
-    // recordId 要带上服务端已有那条记录的 id：早期实验留下的「无附件旧记录」会遮住新写入，
+    // recordId / updateCount 用刚重进会话读到的这一行：枚举到现在可能隔了几分钟，期间老师改题或旧记录变化都会让它们过期。
+    // recordId 必须带上服务端已有那条记录的 id：早期实验留下的「无附件旧记录」会遮住新写入，
     // 传 null 时 createExercisesList 照样回 200 但列表里读不到附件（实测两道题栽在这上面）。
-    const body={poList:[{exercisesId:'${q.qid}',questionType:7,submitAnswer:'[]',submitFile:${JSON.stringify(String(fileId))},referenceAnswer:'',recordId:${JSON.stringify(q.recordId || null)},updateCount:${JSON.stringify(q.uc || 0)}}],
+    const row=(Array.isArray(l0.data)?l0.data:[]).find(x=>String(x.id)==='${q.qid}');
+    const recId=row&&row.recordId?row.recordId:${JSON.stringify(q.recordId || null)};
+    const uc=row&&row.updateCount!=null?row.updateCount:${JSON.stringify(q.uc || 0)};
+    const body={poList:[{exercisesId:'${q.qid}',questionType:7,submitAnswer:'[]',submitFile:${JSON.stringify(String(fileId))},referenceAnswer:'',recordId:recId,updateCount:uc}],
       operationId:oid,studentCourseId:'${list.sid}',unitId:'${q.unitId}',courseId:'${list.cid}'};
     const w=await P('studyRecordExercises/createExercisesList',body);
     const f=await P('studyRecordExercises/createList',body);
@@ -179,10 +195,13 @@ for (const q of todo) {
     return JSON.stringify({oid:oid.slice(0,8),write:{code:w.code,msg:String(w.msg||'').replace(/\s+/g,' ').slice(0,200)},fin:{code:f.code,msg:String(f.msg||'').replace(/\s+/g,' ').slice(0,120)},readBack:rb})
   })()`));
   console.log(`  提交 ${q.unitName}: oid=${sub.oid} 写入 code=${sub.write.code} ${sub.write.msg} | 交卷 code=${sub.fin.code} ${sub.fin.msg} | 回读 命中=${sub.readBack.found}(读${sub.readBack.n}题) 已答=${sub.readBack.answered} submitFile=${sub.readBack.file}`);
-  // 成败以服务端回读为准；但"没读到题"要单独成档，不能混报成"没写进去"
-  results.push({ q: q.unitName, ok: !!(sub.readBack.found && sub.readBack.answered), unread: !sub.readBack.found, detail: sub });
+  // 成败以服务端回读为准：必须命中原题，且 submitFile 恰好等于本次上传的 fileId。
+  // 只看"有附件"不够 —— REDO 时旧附件会残留，会被误判成本次提交成功。
+  // "没读到题"单独成档，不能混报成"没写进去"。
+  results.push({ q: q.unitName, ok: !!(sub.readBack.found && sub.readBack.sameFile), unread: !sub.readBack.found, detail: sub });
 }
 const good = results.filter((r) => r.ok).length;
 const unread = results.filter((r) => r.unread).length;
-console.log(`\n服务端确认落库 ${good}/${results.length} 道编程题${unread ? `；另有 ${unread} 道回读没命中题目（状态未知，既不算成功也不算失败）` : ''}`);
-process.exit(good + unread < results.length ? 4 : 0);
+console.log(`\n服务端确认落库 ${good}/${results.length} 道编程题${unread ? `；其中 ${unread} 道回读没命中题目（未核验按失败计）` : ''}`);
+// 未核验 = 失败：读不到结果不能算成功收工。
+process.exit(good < results.length || warns.length ? 4 : 0);

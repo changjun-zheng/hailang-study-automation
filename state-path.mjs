@@ -14,7 +14,8 @@ export function latestStateFile(root) {
   try { names = fs.readdirSync(root); } catch { return null; }
   const cands = names
     .filter((f) => /^\.runner-state(?:-[^.]+)?\.json$/.test(f))
-    .map((f) => ({ f, t: fs.statSync(path.join(root, f)).mtimeMs }))
+    .map((f) => { try { return { f, t: fs.statSync(path.join(root, f)).mtimeMs }; } catch { return null; } })
+    .filter(Boolean)
     .sort((a, b) => b.t - a.t);
   return cands.length ? path.join(root, cands[0].f) : null;
 }

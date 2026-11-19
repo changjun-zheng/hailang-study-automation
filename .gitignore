@@ -8,6 +8,7 @@
 
 # 接口响应转储（含平台题库的 referenceAnswer 字段）
 .cdp/*.json
+.cdp/knowledge-answers/
 exercises-*.json
 
 # 实验过程的原始输出

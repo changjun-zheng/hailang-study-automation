@@ -59,6 +59,7 @@ const doneMark = (job) => {
   const last = lines[lines.length - 1] || '';
   if (/\[守护\] 课程播放完成/.test(last)) return 'ok';
   if (/\[守护\] 达到重启上限仍未正常结束/.test(last)) return 'capped';
+  if (/\[守护\] 需要人工处理/.test(last)) return 'attention';
   return '';
 };
 
@@ -71,14 +72,34 @@ for (const job of QUEUE) {
   }
   const mark = doneMark(job);
   if (mark === 'ok') { console.log(stamp(), `[队列] 「${job.course}」服务端已确认完成，跳过`); continue; }
-  if (mark === 'capped') { console.log(stamp(), `[队列] 「${job.course}」上一轮已达重启上限，队列不再自动重试（先看成因，登录态丢失是最常见的一种）`); continue; }
+  // attention/capped 是「上一次启动」的末行，不是永久判决：用户修好登录后重跑队列必须能再试。
+  // capped 例外：60 轮代价太高，只有显式 --retry-capped 才重试。
+  if (mark === 'capped') {
+    if (!process.argv.includes('--retry-capped')) { console.log(stamp(), `[队列] 「${job.course}」上一轮已达重启上限，跳过；确认成因后加 --retry-capped 重试`); continue; }
+    console.log(stamp(), `[队列] 「${job.course}」上一轮达到重启上限，按 --retry-capped 重新尝试`);
+  }
+  if (mark === 'attention') console.log(stamp(), `[队列] 「${job.course}」上一轮需要人工处理，本次重新尝试（先确认登录态）`);
   console.log(stamp(), `[队列] 开始「${job.course}」`);
-  await new Promise((res) => {
-    const p = spawn(process.execPath, ['.cdp/supervise.mjs', '--course', job.course], { cwd: ROOT, stdio: ['ignore', fs.openSync(path.join(ROOT, job.log), 'a'), 'inherit'] });
+  const code = await new Promise((res) => {
+    let logFd;
+    try { logFd = fs.openSync(path.join(ROOT, job.log), 'a'); }
+    catch (e) { console.error(stamp(), `[队列] 打不开日志 ${job.log}：${e.message}`); res(1); return; }
+    let p;
+    try {
+      p = spawn(process.execPath, ['.cdp/supervise.mjs', '--course', job.course], { cwd: ROOT, stdio: ['ignore', logFd, 'inherit'] });
+    } catch (e) {
+      console.error(stamp(), `[队列] 启动失败：${e.message}`);
+      res(1);
+      return;
+    } finally {
+      try { fs.closeSync(logFd); } catch {}   // 子进程已复制句柄，父进程这份不关就是 fd 泄漏
+    }
     fs.writeFileSync(pidFileOf(job), String(p.pid));
-    p.on('exit', res);
+    p.on('error', (e) => { console.error(e.message); res(1); });
+    p.on('exit', (value) => res(value ?? 1));
   });
   try { fs.unlinkSync(pidFileOf(job)); } catch {}
+  if (code !== 0) { console.log(stamp(), `[队列] 「${job.course}」未完成（code=${code}），停止队列`); process.exitCode = code; break; }
   console.log(stamp(), `[队列] 「${job.course}」跑完`);
 }
-console.log(stamp(), '[队列] 全部排队任务处理完毕');
+console.log(stamp(), process.exitCode ? '[队列] 已停止，仍有未完成任务' : '[队列] 全部排队任务处理完毕');

@@ -11,6 +11,7 @@ const path = await import('node:path');
 const os = await import('node:os');
 const { spawn } = await import('node:child_process');
 const { stateFileFor } = await import('./state-path.mjs');
+const { connectCdp, checkedResponse, courseGap, browserRequest, fetchCourseList } = await import('./runtime.mjs');
 
 const arg = (n, d) => {
   const i = process.argv.indexOf(n);
@@ -81,7 +82,7 @@ if (!(await cdpAlive())) {
 // runner 必须独占一个标签页：否则任何在同标签页里的导航都会打断播放（踩过）。
 // 用锁文件记住 targetId，标签没了就新建一个，绝不跟取证脚本抢同一个页面。
 const LOCK = path.join(ROOT, '.cdp', 'runner-tab.json');
-const listPages = async () => (await (await fetch(BASE + '/json/list')).json()).filter((t) => t.type === 'page');
+const listPages = async () => (await (await fetch(BASE + '/json/list', { signal: AbortSignal.timeout(10000) })).json()).filter((t) => t.type === 'page');
 let pinned = null;
 try {
   pinned = JSON.parse(fs.readFileSync(LOCK, 'utf8')).id;
@@ -90,7 +91,7 @@ const pages = await listPages();
 let tab = pinned && pages.find((t) => t.id === pinned);
 let reusedTab = false;
 if (!tab) {
-  const created = await (await fetch(BASE + '/json/new?about:blank', { method: 'PUT' })).json();
+  const created = await (await fetch(BASE + '/json/new?about:blank', { method: 'PUT', signal: AbortSignal.timeout(10000) })).json();
   tab = created;
   fs.writeFileSync(LOCK, JSON.stringify({ id: created.id, at: new Date().toISOString() }, null, 1));
   log('为 runner 新建独占标签页 ' + created.id.slice(0, 10));
@@ -98,29 +99,13 @@ if (!tab) {
   reusedTab = true;
   log('沿用 runner 独占标签页 ' + tab.id.slice(0, 10));
 }
-let seq = 0;
-const inflight = new Map();
-const ws = new WebSocket(tab.webSocketDebuggerUrl);
-await new Promise((res, rej) => {
-  ws.onopen = res;
-  ws.onerror = () => rej(new Error('CDP ws 连接失败'));
-  ws.onmessage = (m) => {
-    const x = JSON.parse(m.data);
-    if (x.id && inflight.has(x.id)) {
-      const p = inflight.get(x.id);
-      inflight.delete(x.id);
-      x.error ? p.rej(new Error(x.error.message)) : p.res(x.result);
-    }
-  };
-});
-const send = (method, params = {}) =>
-  new Promise((res, rej) => {
-    const id = ++seq;
-    inflight.set(id, { res, rej });
-    ws.send(JSON.stringify({ id, method, params }));
-  });
+const { ws, send } = await connectCdp(tab.webSocketDebuggerUrl);
 const evl = async (expression) => {
   const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  // runtime 的会话/账号校验抛的是中文消息，不只 code=488；漏掉它们会把「被顶下线」当成普通错误重试 60 轮。
+  if (r.exceptionDetails && /HTTP (401|403)|code=(401|403|488)|退出登录|其他设备|其它设备|当前账号于|登录会话发生变化|当前账号与任务账号不一致/.test(r.exceptionDetails.exception?.description || '')) {
+    ws.close(); process.exit(4);
+  }
   if (r.exceptionDetails) throw new Error((r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'eval 异常').slice(0, 300));
   return r.result?.value;
 };
@@ -150,27 +135,25 @@ if (!tab.url.includes('study.cqie.edu.cn')) {
 
 // ---------- 平台接口（在页面上下文里发同源请求，鉴权头由页面自己带） ----------
 async function getJson(url) {
-  return guard(JSON.parse(await evl(`fetch(${JSON.stringify(url)}, {headers:{Authorization: localStorage.getItem('token2')}}).then(r=>r.text())`)));
+  return guard(await evl(`(${browserRequest.toString()})(${JSON.stringify(url)}, {headers:{Authorization: localStorage.getItem('token2')}}, false, ${JSON.stringify(prof.studyNumber)})`));
 }
 // 这个平台一个账号只允许一个在线会话：他在别处登录就会把 runner 这个会话踢下线。
 // 被踢之后**读接口还会返回 200**（有时是空 data，有时直接 code:488），但**写接口全部静默丢弃** ——
 // 表现就是"视频一条条播完、服务端一条记录都不加"。昨天就是这么白烧了 7 小时，所以这里必须主动识别并退出。
 const guard = (j) => {
   const msg = String((j && j.msg) || '');
-  if (j && (j.code === 488 || /退出登录|其他设备|其它设备/.test(msg))) {
+  if (j && ([401, 403, 488].includes(Number(j.code)) || /退出登录|其他设备|其它设备/.test(msg))) {
     log('! 会话已被服务端登出：' + msg);
     log('! 单账号只允许一个在线会话，请先在 runner 这个 Chrome 里重新登录，再跑（他那边会被踢，二者不能同时用）。');
     ws.close();
     process.exit(4);
   }
-  return j;
+  return checkedResponse(j);
 };
 
 async function postJson(url, body) {
   return guard(
-    JSON.parse(
-      await evl(`fetch(${JSON.stringify(url)}, {method:'POST', headers:{Authorization: localStorage.getItem('token2'),'Content-Type':'application/json'}, body: ${JSON.stringify(JSON.stringify(body))}}).then(r=>r.text())`)
-    )
+    await evl(`(${browserRequest.toString()})(${JSON.stringify(url)}, {method:'POST', headers:{Authorization: localStorage.getItem('token2'),'Content-Type':'application/json'}, body: ${JSON.stringify(JSON.stringify(body))}}, false, ${JSON.stringify(prof.studyNumber)})`)
   );
 }
 
@@ -199,11 +182,7 @@ if (has('--adopt-state')) {
   log(`! 如果 ${path.basename(STATE_LEGACY)} 其实就是这个账号跑出来的，加 --adopt-state 收编它，否则会白重播一遍`);
 }
 log(`账号=${prof.studyNumber} 状态文件=${path.basename(STATE)}`);
-const courses = await postJson('/gateway/frequent/orgStudent/pagedMyCourse', {
-  filters: { courseNature: null, name: '', schoolYear: '', studentId: me, term: '', courseFlag: 0 },
-  pageIndex: 1,
-  pageSize: 50,
-});
+const courses = await fetchCourseList(postJson, { courseNature: null, name: '', schoolYear: '', studentId: me, term: '', courseFlag: 0 });
 const course = ((courses.data && (courses.data.records || courses.data.list)) || []).find((c) => c.name === COURSE);
 if (!course) {
   const got = (courses.data?.records || courses.data?.list) || [];
@@ -212,15 +191,20 @@ if (!course) {
   process.exit(1);
 }
 log(`课程=${course.name} 已学=${course.learned} 任务=${course.haveUnit}/${course.sumUnit}`);
+if (!course.version) { console.error('课程未返回培养方案版本，停止任务以免使用错误版本'); ws.close(); process.exit(5); }
 
 const barriersResp = await getJson(`/gateway/system/orgStudent/listCourseBarrier?courseId=${course.id}&majorId=${majorId}&userId=${me}&version=${course.version}&studentCourseId=${course.studentCourseId}`);
-const bList = (barriersResp.data || []).slice().sort((a, b) => (a.sortCode || 0) - (b.sortCode || 0));
+// 空集合平台不一定回 []（实测有 data:null）：只有"有值但不是数组"才算格式异常。
+if (barriersResp.data != null && !Array.isArray(barriersResp.data)) throw new Error('关卡列表响应格式异常');
+const bList = (Array.isArray(barriersResp.data) ? barriersResp.data : []).slice().sort((a, b) => (a.sortCode || 0) - (b.sortCode || 0));
 log(`关卡数=${bList.length}`);
 if (ANSWER_ONLY) {
   log('只答题，不刷视频');
-  await runAnswerScript(APPLY_ANSWER ? ['--apply'] : []);
+  // --dry 是只读预检，绝不能因为同时带了 --apply 就把答案真写进账号。
+  if (DRY) { log('（--dry：只报告，不启动答题子进程）'); ws.close(); process.exit(0); }
+  const code = await runAnswerScript(APPLY_ANSWER ? ['--apply'] : []);
   ws.close();
-  process.exit(0);
+  process.exit(code === 0 ? 0 : 6);
 }
 
 
@@ -235,7 +219,8 @@ const save = () => fs.writeFileSync(STATE, JSON.stringify(state, null, 1));
 // 一个关卡下的视频清单（接口返回扁平数组：id=课程单元id）
 async function videosOf(barrierId) {
   const r = await getJson(`/gateway/system/orgStudent/listCatalogBarrier?barrierId=${barrierId}&studentCourseId=${course.studentCourseId}`);
-  return (r.data || []).filter((n) => n.videoId).map((n) => ({ unitId: n.id, videoId: n.videoId, name: n.catalogName || '', seconds: n.timeLength || 0, videoStatus: n.studyVideoStatus }));
+  if (r.data != null && !Array.isArray(r.data)) throw new Error('视频列表响应格式异常');
+  return (Array.isArray(r.data) ? r.data : []).filter((n) => n.videoId).map((n) => ({ unitId: n.id, videoId: n.videoId, name: n.catalogName || '', seconds: n.timeLength || 0, videoStatus: n.studyVideoStatus }));
 }
 // 权威枚举：学习页自己用的就是 progressDetails，它给的是一整棵目录树。
 // listCourseBarrier 会漏掉「课程介绍」这种没有子节点的顶层关卡 —— 实测整棵树 41 条、关卡接口只给 40 条，
@@ -247,6 +232,7 @@ async function progressVideos() {
     for (const v of n.courseCatalogVideoVos || []) out.push({ unitId: v.unitId || n.id, videoId: v.id, name: v.name || '', seconds: v.timeLength || 0, videoStatus: v.studyVideoStatus });
     for (const c of n.children || []) walk(c);
   };
+  if (r.data != null && !Array.isArray(r.data)) throw new Error('视频目录响应格式异常');
   (Array.isArray(r.data) ? r.data : []).forEach(walk);
   return out;
 }
@@ -291,18 +277,21 @@ async function nowPlaying() {
 async function runAnswerScript(extraArgs) {
   const { spawn } = await import('node:child_process');
   return new Promise((res) => {
-    const p = spawn(process.execPath, ['answer-exercises.mjs', '--course', COURSE, ...extraArgs], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(process.execPath, ['answer-exercises.mjs', '--course', COURSE, '--cdp', BASE, ...extraArgs], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    const heartbeat = setInterval(() => log('  [答题] 子进程仍在处理，等待逐题核验结果'), 30000);
+    p.on('error', (e) => { clearInterval(heartbeat); log('答题子进程启动失败：' + e.message); res(1); });
     let buf = '';
     p.stdout.on('data', (d) => { buf += d; });
     p.stderr.on('data', (d) => { buf += d; });
-    p.on('exit', (code) => {
+    p.on('close', (code) => {
+      clearInterval(heartbeat);
       const lines = buf.split(String.fromCharCode(10)).filter((l) => /课程「|已答|可提交|跳过 |提交 |回读 |落库 /.test(l));
       for (const l of lines) log('  [答题] ' + l.trim());
       if (!lines.length) log('  [答题] 没有可报告的输出（exit ' + code + '）：' + buf.replace(/\s+/g, ' ').slice(0, 160));
       // exit 4 = 接口回了 200 但服务端回读没数到那条答案，必须显式喊出来，
       // 否则这条会被"提交 code=200"的日志盖过去、当成成功收工。
       if (code === 4) log('  [答题] ! 有单元回读不达标，见上面标 ✗ 的行');
-      res(code);
+      res(code ?? 1);
     });
   });
 }
@@ -334,11 +323,10 @@ async function trustedStart() {
 // 标签页在后台时 Chrome 会推迟媒体加载（readyState 恒为 0、duration=NaN），所以必须把自己顶到前台
 async function activateTab() {
   try {
-    const ver = await (await fetch(BASE + '/json/version')).json();
-    const bws = new WebSocket(ver.webSocketDebuggerUrl);
-    await new Promise((r) => (bws.onopen = r));
-    bws.send(JSON.stringify({ id: 1, method: 'Target.activateTarget', params: { targetId: tab.id } }));
-    await new Promise((r) => setTimeout(r, 700));
+    const ver = await (await fetch(BASE + '/json/version', { signal: AbortSignal.timeout(10000) })).json();
+    const { ws: bws, send: bsend } = await connectCdp(ver.webSocketDebuggerUrl, { timeout: 10000 });
+    await bsend('Target.activateTarget', { targetId: tab.id });
+    await sleep(700);
     bws.close();
   } catch (e) {}
 }
@@ -376,7 +364,7 @@ async function gotoStudy(url, note) {
 async function parkWindow() {
   if (process.env.KEEP_WINDOW_ONSCREEN) return;
   try {
-    const ver = await (await fetch(BASE + '/json/version')).json();
+    const ver = await (await fetch(BASE + '/json/version', { signal: AbortSignal.timeout(10000) })).json();
     // 是不是无头，问实例自己（/json/version 的 Browser 字段），别看环境变量：
     // 连到别人已经起好的可见实例时环境变量是空的，之前就是这里判错，
     // 结果最小化的窗口没被还原，页面 document.hidden=true，媒体直接被 Chrome 推迟加载。
@@ -384,22 +372,11 @@ async function parkWindow() {
       log('无头实例：没有窗口，不需要停放');
       return;
     }
-    const bws = new WebSocket(ver.webSocketDebuggerUrl);
-    const pend = new Map();
-    await new Promise((r) => (bws.onopen = r));
-    bws.onmessage = (m) => {
-      const x = JSON.parse(m.data);
-      if (x.id && pend.has(x.id)) {
-        const p = pend.get(x.id);
-        pend.delete(x.id);
-        p(x.result);
-      }
-    };
-    let id = 0;
-    const ask = (method, params) => new Promise((r) => { const i = ++id; pend.set(i, r); bws.send(JSON.stringify({ id: i, method, params })); });
-    const w = await ask('Browser.getWindowForTarget', { targetId: tab.id });
+    // 用带超时的 CDP 客户端：裸 WebSocket 握手失败会永久挂起，而这里在启动早期、期间没有日志。
+    const { ws: bws, send: bsend } = await connectCdp(ver.webSocketDebuggerUrl, { timeout: 10000 });
+    const w = await bsend('Browser.getWindowForTarget', { targetId: tab.id });
     if (w.bounds && w.bounds.windowState === 'minimized') log('  窗口当前是最小化 —— 最小化会让页面变 hidden 并推迟媒体加载，必须还原成 normal 才能记账');
-    await ask('Browser.setWindowBounds', { windowId: w.windowId, bounds: { left: -30000, top: -30000, width: 1280, height: 800, windowState: 'normal' } });
+    await bsend('Browser.setWindowBounds', { windowId: w.windowId, bounds: { left: -30000, top: -30000, width: 1280, height: 800, windowState: 'normal' } });
     bws.close();
     log('窗口已挪到屏幕外（他看不见，但页面按可见渲染）；要看得见请设 KEEP_WINDOW_ONSCREEN=1 重启');
   } catch (e) {
@@ -651,7 +628,7 @@ async function watchNodes() {
   log(`非闯关制：按目录节点枚举到 ${nodes.length} 个含视频的节点`);
   for (const nd of nodes) {
     const key = `unit:${nd.unitId}`;
-    if (state.done[key]) {
+    if (state.done[key]?.complete === true) {
       log(`  = 跳过已完成 ${nd.name}`);
       continue;
     }
@@ -664,20 +641,26 @@ async function watchNodes() {
       if (s && s.d > 0) break;
     }
     if (!s || !(s.d > 0)) {
-      log(`  ! ${nd.name} 拿不到可播源，记为已尝试`);
-      state.done[key] = { at: new Date().toISOString(), name: nd.name, skipped: true };
+      log(`  ! ${nd.name} 拿不到可播源，记为未完成（下轮会重试）`);
+      state.done[key] = { at: new Date().toISOString(), name: nd.name, skipped: true, complete: false };
       save();
       continue;
     }
     await trustedStart();
     const seenLabels = new Set();
-    let done = false;
-    for (let i = 0; i < 400; i++) {
+    let done = false, spent = 0, budget = 400;
+    while (spent < budget) {
+      spent++;
       await sleep(2000);
       s = await nodeState();
       if (!s) continue;
       if (s.paused) await trustedStart();
-      if (s.label) seenLabels.add(s.label);
+      if (s.label && !seenLabels.has(s.label)) {
+        // 一个节点可能挂多支视频：每见到一支新视频就续一份 400 次预算（约 13 分钟 / 支），
+        // 避免 MyBatis 20 支这类节点被固定预算截断成「⏱ 超时」。
+        if (seenLabels.size > 0) budget += 400;
+        seenLabels.add(s.label);
+      }
       const atEnd = s.ended || (s.d > 0 && s.t >= s.d - 1.5);
       if (atEnd) {
         // 一个节点可能挂多支视频：播放器会自动接下一支，所以先观察一段，标签/时长变了就说明还没播完
@@ -698,13 +681,14 @@ async function watchNodes() {
         }
         continue;
       }
-      if (i % 30 === 29) log(`  · ${s.label || nd.name} ${s.t}/${s.d}s（已见 ${seenLabels.size}/${nd.videoCount} 支）`);
+      if (spent % 30 === 0) log(`  · ${s.label || nd.name} ${s.t}/${s.d}s（已见 ${seenLabels.size}/${nd.videoCount} 支）`);
     }
-    if (!done && seenLabels.size >= nd.videoCount) done = true;
+    // 看见视频标题不代表完整播放，超时仍保留为未完成。
     state.done[key] = { at: new Date().toISOString(), name: nd.name, seconds: Math.round(s ? s.d : 0), complete: done };
     save();
     log(`  ${done ? '✓ 播完' : '⏱ 超时'} ${nd.name}`);
   }
+  return nodes;
 }
 async function nodeState() {
   return JSON.parse(
@@ -721,7 +705,8 @@ if (DRY) {
   if (!bList.length) {
     const tree = await postJson('/gateway/study/courseCatalog/tree', { courseId: course.id });
     const nodes = [];
-    const walkD = (n) => (n.childList || []).forEach((c) => { if ((c.videoCount || 0) > 0) { const k = `unit:${c.id}`; nodes.push({ name: c.name, videoCount: c.videoCount, done: !!state.done[k] }); } walkD(c); });
+    // 与正式流程的跳过判据保持一致：只有 complete===true 才算完成，超时/拿不到源的不能算。
+    const walkD = (n) => (n.childList || []).forEach((c) => { if ((c.videoCount || 0) > 0) { const k = `unit:${c.id}`; nodes.push({ name: c.name, videoCount: c.videoCount, done: state.done[k]?.complete === true }); } walkD(c); });
     walkD(tree.data || {});
     log(`非闯关制：${nodes.length} 个含视频节点（本地已完成 ${nodes.filter((n) => n.done).length}）`);
     process.exit(0);
@@ -736,9 +721,24 @@ if (DRY) {
 
 if (!bList.length) {
   log('非闯关制课程：走目录节点枚举');
-  await watchNodes();
-  const det = await getJson(`/gateway/system/orgStudent/myCourseDetails?studentId=${me}&id=${course.id}&majorId=${majorId}&studentCourseId=${course.studentCourseId}&version=${course.version}`);
+  const nodes = await watchNodes();
+  const det = await getJson(`/gateway/system/orgStudent/myCourseDetails?studentId=${prof.studyNumber}&id=${course.id}&majorId=${majorId}&studentCourseId=${course.studentCourseId}&version=${course.version}`);
   const dx = det.data || {};
+  let gap;
+  try { gap = courseGap(dx); }
+  catch (e) {
+    log(`! ${e.message} → 课程时长无法判定，退出码 5 交人工核验（不再让守护空烧）`);
+    ws.close(); process.exit(5);
+  }
+  if (gap > 2) {
+    // 状态文件按学号共用，unit:<id> 没有课程维度：只能清本轮枚举到的节点，否则会误伤同账号其他课的完成标记。
+    const nodeKeys = new Set(nodes.map((n) => `unit:${n.unitId}`));
+    for (const key of Object.keys(state.done)) if (key.startsWith('unit:') && nodeKeys.has(key)) state.done[key].complete = false;
+    save();
+    log(`✗ 课程时长仍差 ${gap} 秒，保留为未完成（只退回本轮枚举到的 ${nodeKeys.size} 个节点）`);
+    ws.close(); process.exit(3);
+  }
+  if (ANSWER && await runAnswerScript(APPLY_ANSWER ? ['--apply'] : []) !== 0) { ws.close(); process.exit(6); }
   log(`结束。任务 ${dx.haveUnit}/${dx.sumUnit}，时长 ${dx.haveTime}/${dx.sumTime}，练习 ${dx.haveExercises}/${dx.sumExercises}`);
   ws.close();
   process.exit(0);
@@ -785,8 +785,12 @@ for (const b of bList) allServer.push(...(await videosOf(b.id)));
 // 补播关卡接口没覆盖到的条目。放在终态判据之前：这一轮就能把它播掉，而不是等下一轮。
 const covered = new Set(allServer.map((v) => v.videoId));
 const tree = await progressVideos();
-const extra = tree.filter((v) => v.videoId && !covered.has(v.videoId));
+// 只补「关卡接口没覆盖且服务端仍记为未完成」的条目；已记账的树条目不再每轮重播。
+const extra = tree.filter((v) => v.videoId && !covered.has(v.videoId) && v.videoStatus !== 2);
+state.attempts = state.attempts || {};
 if (extra.length) {
+  for (const v of extra) state.attempts[v.videoId] = { count: ((state.attempts[v.videoId] || {}).count || 0) + 1, at: new Date().toISOString(), name: v.name };
+  save();
   log(`权威目录树 ${tree.length} 条，关卡接口只覆盖 ${covered.size} 条 → 补播 ${extra.length} 条：${extra.map((v) => v.name).join('、')}`);
   await watchBarrier(extra);
 } else if (tree.length && tree.length !== covered.size) {
@@ -807,22 +811,31 @@ if (notDone.length) {
 const toSec = (t) => String(t || '0:0:0').split(':').reduce((a, p) => a * 60 + (parseInt(p, 10) || 0), 0);
 const courseDet = await getJson(`/gateway/system/orgStudent/myCourseDetails?studentId=${prof.studyNumber}&id=${course.id}&majorId=${majorId}&studentCourseId=${course.studentCourseId}&version=${course.version}`);
 const cd = courseDet.data || {};
-const gap = toSec(cd.sumTime) - toSec(cd.haveTime);
+// courseGap 在字段缺失/格式异常时会抛：必须在这里转成退出码 5，否则顶层异常 → exit 1 → 守护空烧 60 轮。
+let gap;
+try { gap = courseGap(cd); }
+catch (e) {
+  log(`! ${e.message} → 课程时长无法判定，退出码 5 交人工核验（不再让守护空烧）`);
+  ws.close(); process.exit(5);
+}
 if (cd.sumTime && gap > 2) {
-  // 只有"确实还有能播的东西"才退回下一轮。像 软件工程 那样只差 11 秒、而权威树里也没有
+  // 只有"确实还有能播的东西"才退回下一轮。像 软件工程 那样只差 7 秒、而权威树里也没有
   // 未覆盖的单元时，exit 3 只会让守护空烧到重启上限。
   // 走到这里说明关卡视频已全部 status=2（notDone 分支已在前面 exit 3），
-  // 所以唯一还能动的就是本轮刚补播的那批。
-  if (extra.length > 0) {
-    log(`✗ 课程时长 ${cd.haveTime}/${cd.sumTime}，还差 ${gap} 秒（本轮补播了 ${extra.length} 条，可能还没落库）→ 退出码 3 让守护再补一轮`);
+  // 所以唯一还能动的就是本轮刚补播的那批；同一批连续两轮播完仍不涨账的，是平台不记账的
+  // 结构性缺口（例：课程介绍发了心跳也不计 haveTime），再退 3 只会烧满 60 轮。
+  const retryable = extra.filter((v) => ((state.attempts[v.videoId] || {}).count || 0) < 2);
+  if (retryable.length > 0) {
+    log(`✗ 课程时长 ${cd.haveTime}/${cd.sumTime}，还差 ${gap} 秒（本轮补播 ${retryable.length} 条首次尝试，可能还没落库）→ 退出码 3 让守护再补一轮`);
     ws.close();
     process.exit(3);
   }
-  log(`! 课程时长 ${cd.haveTime}/${cd.sumTime} 差 ${gap} 秒，但关卡全部 status=2、权威树也没有未覆盖单元 —— 这缺口不归因于"漏播"，报出来收工，不让守护空烧`);
+  log(`! 课程时长 ${cd.haveTime}/${cd.sumTime} 差 ${gap} 秒，补播过的条目再播也不涨账 —— 属于结构性缺口，退出码 5，不让守护空烧`);
+  ws.close(); process.exit(5);
 }
 if (ANSWER) {
   log('全部视频已记账，开始做客观题');
-  await runAnswerScript(APPLY_ANSWER ? ['--apply'] : []);
+  if (await runAnswerScript(APPLY_ANSWER ? ['--apply'] : []) !== 0) { ws.close(); process.exit(6); }
 } else {
   log('（没加 --answer，本轮只刷视频不做题）');
 }

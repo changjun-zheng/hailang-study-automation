@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         海浪智学 · 任务面板
 // @namespace    local.hailang.autocourse
-// @version      0.5.4
+// @version      0.5.6
 // @description  学生端任务面板：看账号与每门课缺口、勾选课程排队刷、默认静音+2倍速、切窗口/切标签被停会自动接手，并把「服务端到底记没记账」直接显示出来
 // @author       hailang-user
 // @match        https://study.cqie.edu.cn/stu/*
@@ -11,6 +11,20 @@
 // ==/UserScript==
 
 /*
+ * v0.5.6 面板状态机收口（审计后一次改完）：
+ *   ① 「有习题待完成」弹窗根本没被认出来。实际文案是「知识点：… 有习题：(2题) 待完成」，
+ *      旧正则 /有习题待完成/ 永远匹配不到 —— 这就是"片尾卡住"的另一个来源。改成允许中间夹题数。
+ *   ② 面板自己的起播手势也是 pointerdown，会把「他 3 秒内碰过播放器」点亮，紧接着站点因失焦
+ *      暂停就不接手。现在只认真实输入（isTrusted），并在 1.5 秒窗口内尊重他手改的倍速/音量。
+ *   ③ 声音/倍速按"视频身份"记归属：他亲手改过的这条不再按回去，换下一条恢复默认档。
+ *   ④ 单门课读时长失败不再拖垮整个课程列表，也不会再被 scan().catch(pauseTask) 顺手暂停任务；
+ *      失败的课标「时长未知」。
+ *   ⑤ 暂停后的任务点「开始」是继续（保留 i / skipped），不是从第一门重刷；启动时把暂停原因打出来。
+ *   ⑥ 时长对不上（如「课程介绍」不计 haveTime）给人出口：「跳过本门」记进 job.skipped，不假装完成。
+ *   ⑦ 习题按单元隔离失败、空单元 data:null 当"没题"、释放会话失败不吞原始错误；"没读到"与
+ *      "没记上"分开报，两者都不许算成功。
+ *   ⑧ 自动起播开关关掉时，"停着呢"这一点仍要被检测出来（按钮要提示），只是不自动发手势。
+ *
  * v0.5.4 修「勾了『刷完自动做题』，换一条视频勾就自己没了」。
  *   成因：跳下一条视频是整页重载，面板重新注入时 G 全部回到默认值，而三个开关
  *   （自动起播 / 刷完自动做题 / 声音档）只存在内存里，HTML 里还是写死的 checked。
@@ -119,13 +133,17 @@
   // 三个用户开关（自动起播 / 刷完自动做题 / 声音档）必须落盘：跳下一条视频是整页重载，
   // 内存里的 G 每次都会被重置回默认值 —— 实测勾了「刷完自动做题」，换一条视频勾就没了。
   const PREF_KEY = 'kg-prefs';
-  const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}'); } catch (e) { return {}; } };
+  // 存盘可能被旧版本或手改弄脏：非对象/数组一律当空；写失败（隐私模式）也不能把面板打挂。
+  const loadPrefs = () => {
+    try { const p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}'); return p && typeof p === 'object' && !Array.isArray(p) ? p : {}; }
+    catch (e) { return {}; }
+  };
   const PREF0 = loadPrefs();
-  const savePref = (k, v) => { const p = loadPrefs(); p[k] = v; localStorage.setItem(PREF_KEY, JSON.stringify(p)); };
+  const savePref = (k, v) => { try { const p = loadPrefs(); p[k] = v; localStorage.setItem(PREF_KEY, JSON.stringify(p)); } catch (e) { console.warn('[任务面板] 偏好没存上', e); } };
 
   // ---------- ② 单例 ----------
   if (window.__kgPanel) { console.log('[任务面板] 已有实例，本次不重复注入'); return; }
-  window.__kgPanel = { version: '0.5.4' };
+  window.__kgPanel = { version: '0.5.6' };
   const dedupe = () => {
     const all = document.querySelectorAll('#kg-panel');
     for (let i = 1; i < all.length; i++) all[i].remove();
@@ -133,9 +151,11 @@
   };
 
   const G = {
-    list: [], queue: [], cur: null, beats: 0, monitor: 0, mode: PREF0.mode || 'mute',
-    autoStart: PREF0.autoStart !== false,
-    running: false, baseHave: 0, log: [], waiting: false, late: 0, answerAfter: !!PREF0.answerAfter, answered: 0, answering: false,
+    list: [], queue: [], cur: null, beats: 0, monitor: 0,
+    // 声音档只认三态里的值：存盘被改成 'loud' 之类时退回静音，绝不能变成"未静音、满音量"
+    mode: ['mute', 'whisper', 'on'].includes(PREF0.mode) ? PREF0.mode : 'mute',
+    autoStart: typeof PREF0.autoStart === 'boolean' ? PREF0.autoStart : true,
+    running: false, baseHave: 0, log: [], waiting: false, late: 0, answerAfter: PREF0.answerAfter === true, answered: 0, answering: false,
     ansState: 'idle', ansDone: 0, ansMsg: null, ansLast: null, ansAt: 0,
   };
   window.__kgPanel.G = G;   // 给自检脚本读数用（面板自己不依赖它）
@@ -220,8 +240,10 @@
     setTimeout(() => { if (v.paused) v.play().catch((e) => say('play() 被拒：' + e.name)); }, 900);
     return `${hit.tagName}.${String(hit.className).slice(0, 26)}`;
   }
-  // 「这次暂停是不是他亲手点的」——判据不能用「页面是否 hidden」（见下面 ⑥），也不能被 hidden 挡住
+  // 「这次暂停是不是他亲手点的」——判据不能用「页面是否 hidden」（见下面 ⑥），也不能被 hidden 挡住。
+  // 这里只说"这次暂停该不该接手"，自动起播开关只决定要不要自动发起手势（关掉时按钮仍要提示「停着呢」）。
   const resumable = (v) => {
+    if (!onStudy() || !loadJob()) return false;
     if (!v || v.tagName !== 'VIDEO') return false;
     if (Date.now() - (v.__kgUserAt || 0) < 3000) return false;                // 他刚碰过播放器，这次暂停是他的意图
     if (v.duration && v.currentTime >= v.duration - 0.5) return false;        // 播到片尾，别原地复活
@@ -237,13 +259,15 @@
   //      这一下可能几秒甚至更久之后才跑。
   // 所以现在不分 hidden 与否：只要这次 pause 不是他三秒内亲手碰过播放器，就在同一个事件里同步
   // play()（同步调用不受定时器节流影响），定时器只做兜底重试。
-  if (STUDY) {
+  // 注意：这个块里的回调只会在事件触发时执行。它们引用的 soundOwned / rateOwned / RATE /
+  // soundDiffers 声明在下面的 ⑤（脚本初始化完成后才存在）—— 别在这里加初始化期的同步调用。
+  {
     const dH = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
     const dV = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
     const reallyHidden = () => (dH && dH.get ? !!dH.get.call(document) : !!document.hidden);
     try {
-      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
-      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => onStudy() && loadJob() ? false : !!(dH && dH.get && dH.get.call(document)) });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => onStudy() && loadJob() ? 'visible' : (dV && dV.get ? dV.get.call(document) : 'visible') });
     } catch (e) { console.warn('[任务面板] 可见性伪装失败', e); }
 
     // 「他亲手碰了播放器」必须只算播放器区域。上一版把任何 pointerdown 都记成用户意图，
@@ -251,15 +275,21 @@
     const inPlayer = (t) => {
       try { return !!(t && t.closest && t.closest('video, .dplayer, [class*=player], [class*=play], [class*=control]')); } catch (e) { return false; }
     };
+    // 面板自己的起播手势也是 pointerdown。不排除合成事件的话，每发起一次手势就会被当成
+    // 「他 3 秒内碰过播放器」，紧接着站点失焦暂停就再也不接手 —— 等于把核心功能自己关掉。
+    const inVolume = (t) => { try { return !!(t && t.closest && t.closest('input[type=range], [class*=volume], [class*=mute]')); } catch (e) { return false; } };
     const markUser = (e) => {
+      if (e.isTrusted === false) return;
       const t = e.target;
       if (t && t.closest && t.closest('#kg-panel')) return;
       if (e.type === 'keydown') {
-        if (!/^( |k|K|p|P)$/.test(e.key)) return;
+        // 方向键在播放器里是快进/调音量，同样算他的意图
+        if (!/^( |k|K|p|P|m|M|ArrowLeft|ArrowRight|ArrowUp|ArrowDown)$/.test(e.key)) return;
         if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
       } else if (!inPlayer(t)) return;
       const v = document.querySelector('video');
       if (v) v.__kgUserAt = Date.now();
+      if (e.type === 'pointerdown' && inVolume(t)) G.volAt = Date.now();   // 声音归属只认音量控件，不认播放键
     };
     document.addEventListener('pointerdown', markUser, true);
     document.addEventListener('keydown', markUser, true);
@@ -272,6 +302,10 @@
         if (Date.now() - (v.__kgUserAt || 0) < 3000) say('  检测到暂停·判为你亲手点的（3 秒内碰过播放器），不接手');
         return;
       }
+      if (!G.autoStart) {
+        if (!G.autoOffSaid) { G.autoOffSaid = 1; say('  检测到暂停：自动起播已关，这次不接手（点「立即起播」或重新打开开关）'); }
+        return;
+      }
       const why = reallyHidden() ? '页面被切走' : '窗口失焦';
       G.pauses = (G.pauses || 0) + 1;
       // 接手也要发起播手势，不能只 v.play()：纯 play() 只动画面，组件状态机还停在"暂停"，
@@ -279,23 +313,44 @@
       const hit = fireGesture();
       if (G.pauses <= 12) say(`  已自动接手第 ${G.pauses} 次（${why}，手势打在 ${hit} 上）`);
       clearTimeout(v.__kgResume);
-      v.__kgResume = setTimeout(() => { if (v.paused && resumable(v)) fireGesture(); }, 2000);
+      v.__kgResume = setTimeout(() => { if (v.paused && G.autoStart && resumable(v)) fireGesture(); }, 2000);
     }, true);
     // 静音必须**当场**生效，不能等 1.2 秒的轮询：站点在起播那一刻会把 muted 设回 false，
     // 那 1.2 秒就是他听到的"突然外放"。所以在 play/volumechange 事件里当场按回去。
+    // 但他亲手动过音量控件的这条视频要认账（soundOwned），否则"我明明关了声音它又给我打开"。
     const clampSound = (e) => {
+      if (!onStudy() || !loadJob()) return;
       const el = e.target;
       if (!el || (el.tagName !== 'VIDEO' && el.tagName !== 'AUDIO')) return;
-      if (G.mode === 'mute') { if (!el.muted) { el.muted = true; el.__kgMode = G.mode; } }
-      else if (el.muted || Math.abs(el.volume - (G.mode === 'whisper' ? 0.02 : 1)) > 0.001) { applyMode(el); el.__kgMode = G.mode; }
+      if (soundOwned.has(el) || !soundDiffers(el)) return;
+      if (e.type === 'volumechange' && userSound()) {
+        soundOwned.add(el);
+        say('  你刚手动调过声音，这一条内不再按回去（换下一条恢复默认档）');
+        return;
+      }
+      applyMode(el); el.__kgMode = G.mode;
     };
     document.addEventListener('play', clampSound, true);
     document.addEventListener('volumechange', clampSound, true);
+    // 倍速同理：播放器初始化/换 src 会把它重置回 1，必须按回 2；
+    // 但 1.5 秒内他真碰过播放器后出现的其它倍速，是他在播放器菜单里选的，这条内尊重。
+    document.addEventListener('ratechange', (e) => {
+      const v = e.target;
+      if (!v || v.tagName !== 'VIDEO') return;
+      if (Math.abs(v.playbackRate - RATE) < 0.01) { rateOwned.add(v); return; }
+      if (Date.now() - (v.__kgUserAt || 0) < 1500) {
+        rateOwned.delete(v);
+        say('  你手动改过倍速，这一条内不按回 2 倍（换下一条恢复）');
+      } else {
+        rateOwned.add(v);
+        try { v.playbackRate = RATE; } catch (err) { }
+      }
+    }, true);
 
     // 标签被 Chrome 挂起（内存节省/效率模式）时 JS 整个冻结，只能等它自己解冻后第一时间补播
     document.addEventListener('resume', () => {
       const v = document.querySelector('video');
-      if (v && v.paused && resumable(v)) { say('  标签从挂起中恢复，补发起播手势'); fireGesture(); }
+      if (v && v.paused && G.autoStart && resumable(v)) { say('  标签从挂起中恢复，补发起播手势'); fireGesture(); }
     });
 
     // 节流看门狗：这条是拿来区分「面板没逻辑」和「Chrome 把这个页面整个当后台了」的。
@@ -321,23 +376,31 @@
   const RATE = 2;
   const MODES = [['mute', '静音'], ['whisper', '微声保活'], ['on', '开']];
   const modeLabel = () => ((MODES.filter((m) => m[0] === G.mode)[0] || MODES[0])[1]);
+  // 状态归属（和 hailang-background-play.user.js 同一套）：脚本自己设的要维持，他亲手改的要认账。
+  // 判据不能用「事件不是我触发的」——播放器起播/换 src 时会自己把 muted、rate 重置回默认。
+  const soundOwned = new WeakSet();   // 这条视频他亲手改过声音
+  const rateOwned = new WeakSet();    // 这条视频他亲手改过倍速
+  const soundDiffers = (el) => G.mode === 'mute' ? !el.muted : (el.muted || Math.abs(el.volume - (G.mode === 'whisper' ? 0.02 : 1)) > 0.001);
+  const userSound = () => Date.now() - (G.volAt || 0) < 3000;
   function applyMode(v) {
-    if (G.mode === 'mute') { v.muted = true; }
+    // 静音用 muted + volume=1：他点开就是正常响度，不会"以为关了结果很小声"
+    if (G.mode === 'mute') { v.muted = true; try { v.volume = 1; } catch (e) { } }
     else { v.muted = false; try { v.volume = G.mode === 'whisper' ? 0.02 : 1; } catch (e) { } }
   }
   const seen = new WeakSet();
   const keyOf = new WeakMap();
-  const rateOwned = new WeakSet();
   function tuneMedia() {
+    if (!onStudy() || !loadJob()) return;
     const vs = document.querySelectorAll('video');
     for (const v of vs) {
       const k = v.currentSrc || v.querySelector && v.querySelector('source') && v.querySelector('source').src || '';
       if (!seen.has(v) || (k && keyOf.get(v) !== k)) {
         seen.add(v); if (k) keyOf.set(v, k);
+        soundOwned.delete(v); rateOwned.delete(v);   // 换了一条视频：上一条的手动选择作废
         applyMode(v); v.__kgMode = G.mode;
         rateOwned.add(v); try { v.playbackRate = RATE; } catch (e) { }
       } else {
-        if (v.__kgMode !== G.mode) { applyMode(v); v.__kgMode = G.mode; }
+        if (!soundOwned.has(v) && v.__kgMode !== G.mode) { applyMode(v); v.__kgMode = G.mode; }
         if (rateOwned.has(v)) { try { if (Math.abs(v.playbackRate - RATE) > 0.01) v.playbackRate = RATE; } catch (e) { } }
       }
     }
@@ -347,16 +410,52 @@
   // ---------- 会话与接口 ----------
   const tok = () => localStorage.getItem('token2') || '';
   const who = () => { try { return JSON.parse(localStorage.getItem('userInfo2') || '{}'); } catch (e) { return {}; } };
-  const post = (p, b) => rawFetch(p, { method: 'POST', headers: { Authorization: tok(), 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then((r) => r.json());
-  const get = (p) => rawFetch(p, { headers: { Authorization: tok() } }).then((r) => r.json());
+  const accountId = () => String(who().studyNumber || who().id || '');
+  const pauseTask = (e) => {
+    const job = readJob();
+    const owned = G.owner && job && String(job.stu) === accountId();
+    if (owned) {
+      job.paused = true; job.reason = String(e.message || e); saveJob(job);
+      say('任务已暂停：' + String(e.message || e) + '；处理后点「开始」继续（进度保留）');
+    } else {
+      // 没有进行中的任务（或这一页没有控制权）时，不能谎报"任务已暂停" —— 他根本没开任务
+      say('接口失败：' + String(e.message || e) + (G.owner ? '（没有进行中的任务，未写暂停标记）' : '（本页无任务控制权）'));
+    }
+    G.navigating = false;
+  };
+  async function request(p, body) {
+    const account = accountId(), token = tok(), job = readJob();
+    if (G.answering) {
+      if (G.answerAccount !== account) throw new Error('答题期间账号已变化');
+      if (!p.endsWith('/clearStudentUnit')) checkJob(G.answerJob);
+    }
+    if (!token || !account) throw new Error('登录态为空，请重新登录');
+    if (job && !job.paused && String(job.stu) !== account) throw new Error('当前账号与任务账号不一致，请停止旧任务后重新开始');
+    const r = await rawFetch(p, { method: body === undefined ? 'GET' : 'POST',
+      headers: { Authorization: token, 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30000) });
+    if (!r.ok) throw new Error('接口 HTTP ' + r.status);
+    const j = await r.json();
+    if (accountId() !== account || tok() !== token) throw new Error('请求期间登录账号或会话发生变化');
+    if (!j || Number(j.code) !== 200) {
+      const e = new Error('接口 code=' + (j && j.code) + ' ' + String(j && (j.msg || j.message) || '响应格式异常'));
+      if (j && [401, 403, 488].includes(Number(j.code))) pauseTask(e);
+      throw e;
+    }
+    return j;
+  }
+  const post = (p, b) => request(p, b || {});
+  const get = (p) => request(p);
   const hhmmss = (s) => { s = Math.max(0, Math.round(s || 0)); return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map((n) => String(n).padStart(2, '0')).join(':'); };
   const toSec = (t) => String(t || '0:0:0').split(':').reduce((a, p) => a * 60 + (parseInt(p, 10) || 0), 0);
 
   async function courseDetails(c) {
+    if (!c.version) throw new Error('课程未返回培养方案版本，不能沿用其他专业的默认版本');
     const u = who();
     const sid = c.studentCourseId || c.id;
-    const d = await get(`/gateway/system/orgStudent/myCourseDetails?studentId=${encodeURIComponent(u.studyNumber || u.id)}&id=${c.id}&majorId=${u.majorId}&studentCourseId=${sid}&version=${c.version || 'BK_RJGC_2024'}`);
-    const x = d.data || {};
+    const d = await get(`/gateway/system/orgStudent/myCourseDetails?studentId=${encodeURIComponent(u.studyNumber || u.id)}&id=${c.id}&majorId=${u.majorId}&studentCourseId=${sid}&version=${c.version}`);
+    const x = d.data;
+    if (!x || ![x.haveTime, x.sumTime].every((v) => v != null && /^\d+(?::\d+){0,2}$/.test(String(v)))) throw new Error('课程时长响应缺失或格式异常，不能判定完成');
     c._sid = sid; c._have = toSec(x.haveTime); c._sum = toSec(x.sumTime);
     return c;
   }
@@ -365,33 +464,88 @@
     const u = who();
     if (!tok()) { say('没有登录态，先登录'); return; }
     say(`账号 ${u.realName || u.name || '?'} / ${u.studyNumber || u.id || '?'}`);
-    const cs = await post('/gateway/frequent/orgStudent/pagedMyCourse', {
-      filters: { courseNature: null, name: '', schoolYear: '', studentId: String(u.id), term: '', courseFlag: 0 },
-      pageIndex: 1, pageSize: 50,
-    });
-    const list = (cs.data && (cs.data.records || cs.data.list)) || [];
-    for (const c of list) { try { await courseDetails(c); } catch (e) { c._have = 0; c._sum = 0; } }
+    const list = [], seen = new Set();
+    for (let pageIndex = 1; ; pageIndex++) {
+      if (pageIndex > 200) throw new Error('课程分页超出上限');
+      const cs = await post('/gateway/frequent/orgStudent/pagedMyCourse', {
+        filters: { courseNature: null, name: '', schoolYear: '', studentId: String(u.id), term: '', courseFlag: 0 }, pageIndex, pageSize: 50,
+      });
+      const page = cs.data && (cs.data.records || cs.data.list);
+      if (!Array.isArray(page)) throw new Error('课程列表响应格式异常');
+      if (!page.length) break;
+      let added = 0;
+      for (const c of page) { const key = String(c.studentCourseId || c.id); if (!seen.has(key)) { seen.add(key); list.push(c); added++; } }
+      if (!added) throw new Error('课程分页未推进');
+      // 只按 total 或空页收尾：按「本页不足 50 条」截断会在服务端分页大小变化时少读课程
+      if (Number(cs.data.total) > 0 && list.length >= Number(cs.data.total)) break;
+    }
+    // 单门课读时长失败（网络抖动、个别课没返回时长字段）不能拖垮整个列表 ——
+    // 以前这里一抛，scan().catch(pauseTask) 把正在刷的任务一起暂停了。
+    for (const c of list) {
+      try { await courseDetails(c); delete c._err; }
+      catch (e) { c._err = String(e.message || e); }
+    }
     G.list = list;
+    G.listAccount = accountId();
     renderCourses();
-    say(`${list.length} 门课，${list.filter((c) => c._sum - c._have > 2).length} 门有时长缺口`);
+    const bad = list.filter((c) => c._err).length;
+    say(`${list.length} 门课${bad ? `（${bad} 门时长读取失败，标为「未知」，不影响其余课）` : ''}，${list.filter((c) => !c._err && c._sum - c._have > 2).length} 门有时长缺口`);
   }
+  // 扫描失败只影响"看"，不能暂停或改写任务状态；会话失效由 request() 自己处理。
+  const scanSafe = () => scan().catch((e) => say('课程列表读取失败：' + String(e.message || e) + '（任务未暂停）'));
 
   // ---------- 任务队列（跨页面跳转活下来，所以存 localStorage） ----------
-  const loadJob = () => { try { return JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch (e) { return null; } };
+  const readJob = () => { try { return JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch (e) { return null; } };
+  const loadJob = () => {
+    if (!G.owner) return null;
+    const j = readJob();
+    if (!j || j.paused) return null;
+    if (String(j.stu) !== accountId()) {
+      say('任务账号已变化：旧任务已保留，请停止旧任务后重新开始'); return null;
+    }
+    return j;
+  };
   const saveJob = (j) => localStorage.setItem(JOB_KEY, JSON.stringify(j));
   const clearJob = () => localStorage.removeItem(JOB_KEY);
+  // Web Locks 随文档销毁释放，避免多个学习标签页同时消费同一队列。
+  // 从 bfcache 恢复时 pagehide 已经执行过、锁也放了，必须重新申请，否则这一页会显示"正在刷"却动不了。
+  G.owner = false;
+  const acquireLock = () => {
+    navigator.locks.request('hailang-task', { ifAvailable: true }, async (lock) => {
+      if (!lock) { say('另一标签页正在控制任务，本页仅显示信息'); return; }
+      G.owner = true;
+      await new Promise((resolve) => window.addEventListener('pagehide', resolve, { once: true }));
+      G.owner = false;
+    }).catch((e) => say('任务锁获取失败：' + e.message));
+  };
+  if (navigator.locks) {
+    acquireLock();
+    window.addEventListener('pagehide', () => { G.owner = false; });
+    window.addEventListener('pageshow', (e) => { if (e.persisted && !G.owner) { say('从缓存恢复页面，重新申请任务锁'); acquireLock(); } });
+  } else say('浏览器不支持任务锁，自动任务已停用');
+  const checkJob = (job) => {
+    const current = loadJob();
+    if (!current || current.started !== job.started || current.i !== job.i) throw new Error('任务已停止或被替换');
+  };
   // 勾选也要存：上一版每次渲染都按"有没有缺口"重画勾，用户自己勾的课会被冲掉
   const SEL_KEY = 'kg-sel';
-  const loadSel = () => { try { return JSON.parse(localStorage.getItem(SEL_KEY) || 'null'); } catch (e) { return null; } };
-  const saveSel = (ids) => localStorage.setItem(SEL_KEY, JSON.stringify(ids));
+  const loadSel = () => {
+    try { const v = JSON.parse(localStorage.getItem(SEL_KEY) || 'null'); return Array.isArray(v) ? v : null; } catch (e) { return null; }
+  };
+  const saveSel = (ids) => { try { localStorage.setItem(SEL_KEY, JSON.stringify(ids)); } catch (e) { } };
 
   function pickQueue() {
     const box = document.getElementById('kg-courses');
     const ids = [...box.querySelectorAll('input:checked')].map((i) => i.dataset.id);
-    return G.list.filter((c) => ids.includes(c.id)).map((c) => ({ id: c.id, name: c.name, sid: c._sid, ver: c.version || 'BK_RJGC_2024' }));
+    return G.list.filter((c) => ids.includes(String(c.id))).map((c) => ({ id: c.id, name: c.name, sid: c._sid, ver: c.version }));
   }
 
   async function startQueue() {
+    if (!G.owner) { say('本页没有任务控制权，请使用正在运行的标签页或刷新本页'); return; }
+    if (G.answering || G.opening) { say('当前操作尚未结束，请稍候'); return; }
+    // 还没扫完时 G.listAccount 是 undefined —— 那是"列表没读完"，不是"账号不对"
+    if (G.listAccount == null) { say('课程列表还没读完，等「刷新课程与缺口」走完再点开始'); return; }
+    if (G.listAccount !== accountId()) { say('课程列表不属于当前账号，请先停止旧任务并刷新课程列表'); return; }
     const q = pickQueue();
     if (!q.length) { say('没勾选任何课程，先勾再点开始'); return; }
     const u = who();
@@ -400,9 +554,25 @@
     say(`已排入 ${q.length} 门：${q.map((x) => x.name.slice(0, 8)).join('、')}（串行，一次只刷一门）`);
     await openNext();
   }
+  // 「上次任务已暂停」和「重新开一份队列」是两件事：暂停后的任务带着进度（i / done），
+  // 直接 startQueue 会把已刷完的课从头再刷一遍。这里只把暂停标记摘掉，沿用原队列。
+  async function resumeQueue(job) {
+    if (!G.owner) { say('本页没有任务控制权，请使用正在运行的标签页或刷新本页'); return; }
+    if (String(job.stu) !== accountId()) { say('旧任务属于另一个账号，不能继续；请点「停」清空后重新勾选'); return; }
+    if (!Array.isArray(job.queue) || !job.queue.length || job.i >= job.queue.length) { clearJob(); say('旧任务队列已失效，已清空，请重新勾选开始'); renderCourses(); return; }
+    job.paused = false; delete job.reason; saveJob(job);
+    G.queue = job.queue; G.cur = job.queue[job.i];
+    say(`继续上次任务：第 ${job.i + 1}/${job.queue.length} 门「${String(G.cur.name || '').slice(0, 12)}」（沿用原队列；要改勾选先点「停」）`);
+    await openNext();
+  }
 
   // 取这门课里还没记满的视频，跳到第一条所在的学习页
   async function openNext() {
+    if (G.opening) return;
+    G.opening = true;
+    try { await openCourse(); } finally { G.opening = false; }
+  }
+  async function openCourse() {
     const job = loadJob();
     if (!job) { say('没有待刷任务'); return; }
     if (job.i >= job.queue.length) {
@@ -417,7 +587,8 @@
     const pd = await get(`/gateway/system/orgStudent/progressDetails?studentId=${encodeURIComponent(job.stu)}&id=${c.id}&majorId=${u.majorId}&studentCourseId=${c.sid}&version=${c.ver}`);
     const vids = [];
     const walk = (n) => { for (const v of (n.courseCatalogVideoVos || [])) vids.push({ id: v.id, unitId: v.unitId || n.id, name: v.name, len: v.timeLength, have: toSec(v.haveTime) }); for (const k of (n.children || [])) walk(k); };
-    (Array.isArray(pd.data) ? pd.data : []).forEach(walk);
+    if (!Array.isArray(pd.data)) throw new Error('视频目录响应缺失，不能按已完成处理');
+    pd.data.forEach(walk);
     // 待播判据优先用**每条视频自己的 haveTime**：progressDetails 的视频节点其实带这个字段
     // （实测 2010-1 时长 339s、haveTime 00:05:39 = 记满），它不会像关卡接口那样漏掉顶层「课程介绍」。
     // 关卡接口只作为拿不到 haveTime 时的兜底 —— 拿不到就按"没看"处理，宁可多播不可漏播。
@@ -428,20 +599,21 @@
         const ns = await get(`/gateway/system/orgStudent/listCatalogBarrier?barrierId=${b.id}&studentCourseId=${c.sid}`);
         for (const n of (ns.data || [])) if (n.videoId) status[n.videoId] = n.studyVideoStatus;
       }
-    } catch (e) { say('  关卡状态取不到，全部按未看处理：' + e.name); }
+    } catch (e) { throw new Error('关卡状态读取失败：' + e.message); }
     const filled = (v) => v.len && v.have >= v.len - 2;
     const hasHave = vids.some((v) => v.have > 0);
     const todo = hasHave ? vids.filter((v) => !filled(v)) : vids.filter((v) => status[v.id] !== 2);
     say(`  待播判据用${hasHave ? '每条视频自己的 haveTime' : '关卡接口状态（这门课没返回 per-video haveTime）'}`);
     job.curVids = vids.map((v) => v.id);
     job.todo = todo.map((v) => ({ id: v.id, unitId: v.unitId, name: v.name }));
-    saveJob(job);
+    checkJob(job); saveJob(job);
     const d = await courseDetails({ id: c.id, studentCourseId: c.sid, version: c.ver });
-    job.baseHave = d._have; saveJob(job);
+    checkJob(job); job.baseHave = d._have; saveJob(job);
     say(`这门课 ${vids.length} 条视频，待播 ${todo.length} 条；服务端当前 ${hhmmss(d._have)}/${hhmmss(d._sum)}`);
+    if (!vids.length) throw new Error('未枚举到视频，不能判定课程完成');
     if (!todo.length) {
-      if (G.answerAfter) await doAnswer({ id: c.id, name: c.name, sid: c.sid, ver: c.ver });
-      say('  已记满，跳过'); job.i++; saveJob(job); return openNext();
+      await finishCourse(job, d);
+      return openCourse();
     }
     const target = vids.find((v) => v.id === todo[0].id);
     const url = `https://study.cqie.edu.cn/stu/pages/MyCourse/Study?id=${c.id}&studentCourseId=${c.sid}&version=${c.ver}&courseUnitId=${target.unitId}&majorId=${who().majorId}&videoId=${target.id}`;
@@ -451,19 +623,33 @@
     location.href = url;
   }
 
+  async function finishCourse(job, details) {
+    const c = job.queue[job.i];
+    const d = details || await courseDetails({ id: c.id, studentCourseId: c.sid, version: c.ver });
+    checkJob(job);
+    if (d._sum - d._have > 2) throw new Error('课程时长仍有缺口，保留任务供重试');
+    if (G.answerAfter && !await doAnswer(c)) throw new Error('答题未完成或未核验，保留当前课程');
+    checkJob(job);
+    job.i++; saveJob(job);
+    say('  服务端时长已核验，进入下一门');
+  }
+
   // ---------- 手动起播（面板自己也会定时调 fireGesture，见 UI 里的自动起播开关） ----------
   function playNow() {
     const hit = fireGesture();
     say(`起播手势打在「${hit}」上（播放键 .d-play-btn 被它盖着，打错元素就不进组件状态机），盯 60 秒看服务端涨不涨`);
-    watchCredit(60);
+    watchCredit(60).catch(pauseTask);
   }
 
   // ---------- 片尾的「有习题待完成」弹窗：关掉继续播，绝不点「去练习」 ----------
   // 站点到片尾会弹这个框，而且**不自己顺播**，视频就停在片尾。runner 从没撞上，是因为它每条视频
   // 都整页导航走了；面板要自己走完队列，就得先把框关掉再跳下一条（点「去练习」会跳去做题）。
   function dismissDialog() {
+    if (!onStudy() || !loadJob()) return null;
+    // 实际文案是「知识点：… 有习题：(2题) 待完成」，中间夹着题数 ——
+    // 早期写的 /有习题待完成/ 永远匹配不到，等于这个框从来没被关过，视频一直停在片尾。
     const box = [...document.querySelectorAll('.el-message-box, .el-dialog')]
-      .find((b) => b.getBoundingClientRect().width > 0 && !(b.closest && b.closest('#kg-panel')));
+      .find((b) => b.getBoundingClientRect().width > 0 && /有习题[\s\S]{0,32}待完成/.test(b.textContent || '') && !(b.closest && b.closest('#kg-panel')));
     if (!box) return null;
     const title = (box.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 46);
     const x = box.querySelector('.el-message-box__headerbtn, .el-message-box__close, .el-dialog__headerbtn');
@@ -476,11 +662,12 @@
     const cur = new URLSearchParams(location.search).get('videoId');
     const i = job.todo.findIndex((v) => v.id === cur);
     const nx = i >= 0 ? job.todo[i + 1] : job.todo.find((v) => v.id !== cur);
-    if (!nx) { job.i++; saveJob(job); say('  这门课的队列走完了，进下一门'); await openNext(); return true; }
+    if (i < 0) throw new Error('当前视频不属于待播队列，请重新开始核对目录');
+    if (!nx) { await finishCourse(job); await openNext(); return true; }
     const c = job.queue[job.i];
     const url = `https://study.cqie.edu.cn/stu/pages/MyCourse/Study?id=${c.id}&studentCourseId=${c.sid}&version=${c.ver}&courseUnitId=${nx.unitId}&majorId=${who().majorId}&videoId=${nx.id}`;
     say(`  跳到下一条「${(nx.name || '').slice(0, 18)}」（不指望站点顺播，它到片尾会弹习题框卡住）`);
-    setTimeout(() => { location.href = url; }, 600);
+    checkJob(job); location.href = url;
     return true;
   }
 
@@ -534,27 +721,39 @@
         const ns = await get(`/gateway/system/orgStudent/listCatalogBarrier?barrierId=${b.id}&studentCourseId=${c.sid}`);
         for (const n of (ns.data || [])) if (n.videoId && !units.some((x) => x.unitId === n.id)) units.push({ unitId: n.id, unitName: n.catalogName, videoId: n.videoId });
       }
-    } catch (e) { /* 关卡接口挂了就走目录树 */ }
+    } catch (e) { throw new Error('习题单元枚举失败：' + e.message); }
     if (!units.length) {
       // 非闯关制课程 listCourseBarrier 返空数组。不兜底就会把"没枚举到"读成"这门课没题"
       const tree = await post(SP('courseCatalog/tree'), { courseId: c.id });
       const walk = (n) => { for (const x of ((n && n.childList) || [])) { if ((x.videoCount || 0) > 0 && !units.some((y) => y.unitId === x.id)) units.push({ unitId: x.id, unitName: x.name || x.sortName || String(x.id), videoId: null }); walk(x); } };
       walk((tree && tree.data) || {});
     }
+    if (!units.length) throw new Error('未枚举到习题单元（关卡接口与目录树都没有 videoCount>0 的节点），需要人工核验课程结构');
     return units;
   }
+  const isSessionLost = (e) => /code=(401|403|488)|退出登录|其他设备|其它设备|当前账号于|登录会话发生变化/.test(String((e && e.message) || e));
+  const hasAnswer = (v) => v != null && String(v).trim() !== '';
+  const verifiedAnswers = (items, rows) => {
+    const byId = new Map(rows.map((q) => [String(q.id), q]));
+    return items.filter((i) => {
+      const q = byId.get(String(i.qid || i.exercisesId));
+      return q && hasAnswer(q.submitAnswer) && normAns(q.submitAnswer) === normAns(i.ref ?? i.submitAnswer);
+    }).length;
+  };
   async function answerExercises(c) {
     const u = who();
     const units = await enumUnits(c);
     let can = 0, done = 0, skip = 0, bad = 0, unread = 0;
     for (const s of units) {
+      try {
       await post(SP('studyRecordExercises/exerciseBarrier'), { studentCourseId: c.sid, unitId: s.unitId });
       const l = await post(SP('studyRecordExercises/exercisesList'), { studentCourseId: c.sid, courseId: c.id, majorId: u.majorId, unitId: s.unitId, version: c.ver });
+      // 空单元可能回 {code:200,data:null}：这只代表"没有题"，不是读失败，别把整门课拖死（与 answer-exercises.mjs 对齐）
       const qs = Array.isArray(l.data) ? l.data : [];
       if (qs.length) {
         const ck = await post(SP('courseCatalogExercisesConfig/checkUpdateExercises'), { studentCourseId: c.sid, courseId: c.id, majorId: u.majorId, unitId: s.unitId, version: c.ver });
         const oid = (ck.data && (ck.data.operationId || ck.data.id)) || '';
-        const items = qs.map((q) => ({ qid: q.id, type: q.questionType, ref: q.referenceAnswer, answered: !!q.submitAnswer, ok: verifiable(q), uc: q.updateCount }));
+        const items = qs.map((q) => ({ qid: q.id, type: q.questionType, ref: q.referenceAnswer, answered: hasAnswer(q.submitAnswer), ok: verifiable(q), uc: q.updateCount }));
         const todo = items.filter((i) => !i.answered && i.ok);
         skip += items.filter((i) => !i.answered && !i.ok).length;
         can += todo.length;
@@ -573,9 +772,9 @@
           if (!rq.length) unread++;   // 读不到题不单独刷屏，汇总行里报"几个单元没读到"
           else {
             const after = rq.filter((q) => !!q.submitAnswer).length;
-            const add = Math.max(0, after - before);
+            const add = verifiedAnswers(todo, rq);
             done += add; G.ansDone = (G.ansDone || 0) + add;   // 给按钮上的实时计数用
-            if (after < before + todo.length) {
+            if (add !== todo.length) {
               bad++;
               // 回读不达标时必须把服务端原话带出来 —— 移植时只丢了这一句，结果第二次重跑还是看不出为什么没记上
               say(`  ${String(s.unitName).slice(0, 16)} 只记到 ${after}，期望 ≥${before + todo.length}｜写入 code=${w && w.code} ${String((w && w.msg) || '').slice(0, 46)}｜交卷 code=${f && f.code} ${String((f && f.msg) || '').slice(0, 46)}`);
@@ -583,20 +782,30 @@
           }
         }
       }
-      await post(SP('studyRecordExercises/clearStudentUnit'), { studentCourseId: c.sid, unitId: s.unitId });
+      } catch (e) {
+        // 被顶下线必须立刻停；其余单单元失败只记一笔，继续处理后面的单元
+        if (isSessionLost(e)) throw e;
+        bad++;
+        say(`  ${String(s.unitName).slice(0, 16)} 出错：${String((e && e.message) || e).slice(0, 60)}`);
+      } finally {
+        // 释放失败不能覆盖 try 里的原始错误（以前 finally 直接 await，一个 502 就把真原因吞了）
+        try { await post(SP('studyRecordExercises/clearStudentUnit'), { studentCourseId: c.sid, unitId: s.unitId }); }
+        catch (e) { if (isSessionLost(e)) throw e; say(`  ${String(s.unitName).slice(0, 16)} 释放习题会话失败：${String((e && e.message) || e).slice(0, 50)}`); }
+      }
     }
     return { units: units.length, can, done, skip, bad, unread };
   }
   async function answerKnowledge(c) {
     const u = who();
     const pd = await get(`/gateway/system/orgStudent/progressDetails?studentId=${encodeURIComponent(u.studyNumber || u.id)}&id=${c.id}&majorId=${u.majorId}&studentCourseId=${c.sid}&version=${c.ver}`);
+    if (!Array.isArray(pd.data)) throw new Error('知识练习目录响应缺失');
     const segs = [];
     const walk = (n, parent) => {
       if (!n || typeof n !== 'object') return;
       for (const [k, v] of Object.entries(n)) {
         if (Array.isArray(v) && /KnowledgeTimeRanges/.test(k) && !/Vos$/.test(k)) for (const s of v) if (s && s.id) segs.push({ segId: s.id, unitId: (parent && parent.unitId) || '', videoId: (parent && (parent.videoId || parent.id)) || '' });
-        if (Array.isArray(v)) for (const it of v) if (it && typeof it === 'object') walk(it, it);
-        else if (v && typeof v === 'object') walk(v, parent);
+        if (Array.isArray(v)) { for (const it of v) if (it && typeof it === 'object') walk(it, it); }
+        else if (v && typeof v === 'object') walk(v, v.unitId ? v : parent);
       }
     };
     walk({ children: Array.isArray(pd.data) ? pd.data : [] }, null);
@@ -606,9 +815,10 @@
     for (const s of uniq) {
       await post(SP('studyKnowledgeExerciseRecord/check'), { segmentKnowledgeId: s.segId, studentCourseId: c.sid, studentId: u.studyNumber || u.id, videoId: s.videoId });
       const l = await post(SP('studyKnowledgeExerciseRecord/exercisesList'), { knowledgeNodeId: s.segId, studentCourseId: c.sid, unitId: s.unitId });
-      const qs = Array.isArray(l.data) ? l.data : [];
+      if (!Array.isArray(l.data)) throw new Error('知识练习列表响应格式异常');
+      const qs = l.data;
       if (!qs.length) continue;
-      const items = qs.map((q) => ({ qid: q.id, type: q.questionType, ref: q.referenceAnswer, answered: !!q.submitAnswer, ok: verifiable(q), uc: q.updateCount }));
+      const items = qs.map((q) => ({ qid: q.id, type: q.questionType, ref: q.referenceAnswer, answered: hasAnswer(q.submitAnswer), ok: verifiable(q), uc: q.updateCount }));
       const todo = items.filter((i) => !i.answered && i.ok);
       skip += items.filter((i) => !i.answered && !i.ok).length;
       can += todo.length;
@@ -623,14 +833,17 @@
       await post(SP('studyKnowledgeExerciseSummaryRecord/createList'), { segmentKnowledgeId: g.segId, poList: g.items, studentCourseId: c.sid, studentId: u.id, courseId: c.id, videoId: g.videoId, unitId: g.unitId, majorId: u.majorId, version: c.ver });
       await post(SP('studyKnowledgeExerciseRecord/check'), { segmentKnowledgeId: g.segId, studentCourseId: c.sid, studentId: u.studyNumber || u.id, videoId: g.videoId });
       const l2 = await post(SP('studyKnowledgeExerciseRecord/exercisesList'), { knowledgeNodeId: g.segId, studentCourseId: c.sid, unitId: g.unitId });
-      const got = (Array.isArray(l2.data) ? l2.data : []).filter((q) => !!q.submitAnswer).length;
-      if (got >= g.items.length) { done += g.items.length; G.ansDone = (G.ansDone || 0) + g.items.length; } else bad++;
+      const got = verifiedAnswers(g.items, Array.isArray(l2.data) ? l2.data : []);
+      done += got; G.ansDone = (G.ansDone || 0) + got;
+      if (got !== g.items.length) bad++;
     }
     return { segs: uniq.length, groups: groups.size, can, done, skip, bad };
   }
   async function doAnswer(c) {
-    if (G.answering) { say('正在做题中，别重复点'); return; }
-    if (!c || !c.sid) { say('没有当前课程：先点「开始」把课程排进队列'); return; }
+    if (G.answering) { say('正在做题中，别重复点'); return false; }
+    if (!c || !c.sid || !loadJob()) { say('没有当前课程：先点「开始」把课程排进队列'); return false; }
+    const job = loadJob();
+    G.answerJob = job; G.answerAccount = accountId();
     G.answering = true; G.ansDone = 0; G.ansState = 'run';
     G.ansLast = `进行中【${c.name}】：只做客观题，已答过的不重交`;
     try {
@@ -640,22 +853,58 @@
       const k = await answerKnowledge(c);
       say(`  知识练习：${k.segs} 个分段 / ${k.groups} 组，落库 ${k.done} 道${k.skip ? `；${k.skip} 道不做` : ''}${k.bad ? `；${k.bad} 组回读不达标` : ''}`);
       G.answered = (G.answered || 0) + a.done + k.done;
-      const n = a.done + k.done, skipN = a.skip + k.skip, badN = a.bad + k.bad;
+      checkJob(job);
+      const n = a.done + k.done, skipN = a.skip + k.skip, badN = a.bad + k.bad, unreadN = a.unread;
       const at = new Date().toTimeString().slice(0, 5);
-      G.ansLast = `${at}【${c.name}】章节习题 +${a.done} 道、知识练习 +${k.done} 道已落库${skipN ? `；${skipN} 道不做（简答题要人写、设计/编程题要产物）` : ''}${badN ? `；${badN} 处回读不达标，需要看日志` : ''}${a.unread ? `；${a.unread} 个单元没读到` : ''}`;
+      G.ansLast = `${at}【${c.name}】章节习题 +${a.done} 道、知识练习 +${k.done} 道已落库${skipN ? `；${skipN} 道不做（简答题要人写、设计/编程题要产物）` : ''}${badN ? `；${badN} 处回读不达标，需要看日志` : ''}${unreadN ? `；${unreadN} 个单元没读到（不能算成功）` : ''}`;
       // 「0 道」不能长得像失败：这门课本来就没题时，说清楚才是好反馈
-      // 有回读不达标就不许显示 ✓：上一版按钮写「＝ 客观题本来就做完了」而状态其实是 bad，自相矛盾
-      G.ansMsg = badN ? `✗ ${badN} 处没记上（原因看结果栏最后一行）` : (n ? `✓ 已交 ${n} 道` : (skipN ? `＝ 客观题都做完了，剩 ${skipN} 道要人写` : '＝ 这门课没有需要做的题'));
-      G.ansState = badN ? 'bad' : 'done'; G.ansAt = Date.now();
-      say(`✓ 这门课的题做完（累计落库 ${G.answered} 道）`);
+      // 有回读不达标 / 没读到就不许显示 ✓："没读到"不等于"没记上"，但也绝不能当成功放行
+      G.ansMsg = (badN || unreadN)
+        ? `✗ ${badN} 处没记上${unreadN ? `，${unreadN} 个单元没读到` : ''}（原因看结果栏最后一行）`
+        : (n ? `✓ 已交 ${n} 道` : (skipN ? `＝ 客观题都做完了，剩 ${skipN} 道要人写` : '＝ 这门课没有需要做的题'));
+      G.ansState = (badN || unreadN) ? 'bad' : 'done'; G.ansAt = Date.now();
+      say((badN || unreadN) ? '答题结果未全部核验，保留任务供重试' : `✓ 客观题处理完成（累计落库 ${G.answered} 道）`);
+      return !badN && !unreadN;
     } catch (e) {
       say('  做题中断：' + e.name + ' ' + String(e.message || '').slice(0, 60));
       G.ansLast = '做题中断：' + e.name + ' ' + String(e.message || '').slice(0, 60);
       G.ansMsg = '✗ 中断了，看日志'; G.ansState = 'bad'; G.ansAt = Date.now();
+      return false;
+    } finally {
+      G.answering = false;
     }
-    G.answering = false;
   }
 
+  // 同时监听媒体事件和轮询，覆盖播放器循环时没有 ended 的情况。
+  const tailSamples = new WeakMap();
+  const tailReached = new WeakSet();
+  function reachedTail(v) {
+    if (!v || !(v.duration > 0) || !Number.isFinite(v.duration)) return false;
+    if (v.seeking) { tailSamples.delete(v); return tailReached.has(v); }
+    const sample = { src: v.currentSrc || v.src, t: v.currentTime, d: v.duration };
+    const prev = tailSamples.get(v);
+    const window = Math.min(v.duration / 2, Math.max(2, (v.playbackRate || 1) * 4));
+    if (prev && (prev.src !== sample.src || prev.d !== sample.d)) tailReached.delete(v);
+    if (v.ended || (prev && prev.src === sample.src && prev.d === sample.d &&
+      prev.t >= sample.d - window && sample.t < prev.t - Math.min(1, sample.d / 4))) tailReached.add(v);
+    tailSamples.set(v, sample);
+    return tailReached.has(v);
+  }
+  ['timeupdate', 'ended'].forEach((type) => document.addEventListener(type, (e) => {
+    if (e.target && e.target.tagName === 'VIDEO') reachedTail(e.target);
+  }, true));
+  document.addEventListener('seeking', (e) => {
+    const v = e.target, prev = tailSamples.get(v);
+    // 循环播放自身也会触发 seeking；播放器区域的近期用户输入才排除为手动拖动。
+    if (prev && prev.t >= prev.d - Math.min(prev.d / 2, 2) && Date.now() - (v.__kgUserAt || 0) > 3000 && v.currentTime < prev.t - Math.min(1, prev.d / 4)) tailReached.add(v);
+    else tailReached.delete(v);
+    tailSamples.delete(v);
+  }, true);
+  document.addEventListener('loadstart', (e) => {
+    tailSamples.delete(e.target); tailReached.delete(e.target);
+    // 新视频开始加载：上一条里"他手动改过声音/倍速"的约定作废
+    soundOwned.delete(e.target); rateOwned.delete(e.target);
+  }, true);
 
   // ---------- UI ----------
   function renderCourses() {
@@ -677,10 +926,12 @@
       nm.textContent = (c.name || '').slice(0, 14);
       const st = document.createElement('span'); st.style.fontSize = '11px';
       if (job && job.curVids && job.queue[job.i] && job.queue[job.i].id === c.id) { st.style.color = '#1d4ed8'; st.textContent = '正在刷'; }
-      else if (gap <= 2 && c._sum) { st.style.color = '#15803d'; st.textContent = '已记满'; }
+      else if (c._err) { st.style.color = '#64748b'; st.textContent = '时长未知'; }
+      else if (!c._sum) { st.style.color = '#64748b'; st.textContent = '时长未知'; }
+      else if (gap <= 2) { st.style.color = '#15803d'; st.textContent = '已记满'; }
       else { st.style.color = '#c2410c'; st.textContent = '缺 ' + hhmmss(gap); }
       const tt = document.createElement('span'); tt.style.color = '#94a3b8';
-      tt.textContent = `${hhmmss(c._have)}/${hhmmss(c._sum)}`;
+      tt.textContent = c._err ? '读取失败' : `${hhmmss(c._have)}/${hhmmss(c._sum)}`;
       row.append(cb, nm, st, tt);
       box.appendChild(row);
     });
@@ -694,7 +945,7 @@
     p.style.cssText = 'position:fixed;right:14px;bottom:14px;width:352px;max-height:74vh;overflow:auto;z-index:2147483000;background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 6px 24px rgba(15,23,42,.16);font:13px/1.5 -apple-system,"Microsoft YaHei",sans-serif;color:#0f172a';
     p.innerHTML = `
       <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#1e3a8a;color:#fff;position:sticky;top:0">
-        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.4</span></b>
+        <b style="flex:1">海浪智学 · 任务面板 <span id="kg-ver" style="font-weight:400;font-size:11px;opacity:.8">v0.5.6</span></b>
         <button id="kg-sound" title="静音 / 微声保活 / 开 三态循环：要挂后台请选微声保活" style="cursor:pointer;font-size:11px">声音：${modeLabel()}</button>
         <button id="kg-min" style="cursor:pointer">—</button>
       </div>
@@ -715,9 +966,10 @@
         <div style="display:flex;gap:6px">
           <button id="kg-run" style="flex:1;cursor:pointer;background:#16a34a;color:#fff;border:0;padding:7px;border-radius:6px">开始刷勾选的课程（排队）</button>
           <button id="kg-stop" style="cursor:pointer">停</button>
+          <button id="kg-skip" title="时长判据对不上（如「课程介绍」不计 haveTime）时手工跳过本门；不记为已完成" style="cursor:pointer;font-size:11px">跳过本门</button>
         </div>
         <pre id="kg-log" style="white-space:pre-wrap;font-size:11.5px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px;margin:8px 0 0;max-height:200px;overflow:auto"></pre>
-        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.4</div>
+        <div style="font-size:11px;color:#94a3b8;margin-top:4px">心跳 <span id="kg-beat">0</span> · 监控 <span id="kg-mon">0</span> · 接手 <span id="kg-pause">0</span> · 暂停事件 <span id="kg-pseen">0</span> · 迟到 <span id="kg-late">0</span>ms · v0.5.6</div>
       </div>`;
     document.body.appendChild(p);
     const jb = p.querySelector('#kg-body');
@@ -730,11 +982,11 @@
       G.mode = MODES[(i + 1) % MODES.length][0];
       savePref('mode', G.mode);
       e.target.textContent = '声音：' + modeLabel();
-      for (const v of document.querySelectorAll('video')) { applyMode(v); v.__kgMode = G.mode; }
+      for (const v of document.querySelectorAll('video')) { soundOwned.delete(v); applyMode(v); v.__kgMode = G.mode; }
       say(G.mode === 'whisper' ? '微声保活：音量 0.02，几乎听不见，但 Chrome 会把它当"正在发声的标签"，后台不节流、不挂起' : '声音：' + modeLabel() + '（倍速保持 2）');
     };
-    p.querySelector('#kg-scan').onclick = () => { say('扫描中…'); scan(); };
-    p.querySelector('#kg-ans').onclick = () => { const job = loadJob(); doAnswer(G.cur || (job && job.queue[job.i]) || null); };
+    p.querySelector('#kg-scan').onclick = () => { say('扫描中…'); scanSafe(); };
+    p.querySelector('#kg-ans').onclick = () => { const job = loadJob(); doAnswer(G.cur || (job && job.queue[job.i]) || null).catch(pauseTask); };
     p.querySelector('#kg-ansauto').onchange = (e) => {
       G.answerAfter = e.target.checked;
       savePref('answerAfter', G.answerAfter);
@@ -743,25 +995,48 @@
     p.querySelector('#kg-play').onclick = playNow;
     p.querySelector('#kg-auto').onchange = (e) => {
       G.autoStart = e.target.checked;
+      G.autoOffSaid = 0;
       savePref('autoStart', G.autoStart);
       say(G.autoStart ? '已开自动起播：视频停着且不是你亲手停的，面板自己发起播手势' : '已关自动起播：只在你点「立即起播」或亲手点播放键时起播');
     };
     p.querySelector('#kg-run').onclick = async () => {
       const job = loadJob();
+      const stored = readJob();
+      if (!job && stored) {
+        G.waiting = false;
+        // 暂停过的任务带着进度（i / skipped / done）：继续它，别从第一门重刷
+        if (stored.paused) resumeQueue(stored).catch(pauseTask);
+        else startQueue().catch(pauseTask);
+        return;
+      }
       // 有任务但这一页没视频 → 这一发就是"跳回去播"，不是回一句无关的「队列没变」
       if (job && !document.querySelector('video')) {
         G.lastNav = Date.now();
         say('  手动跳回待播条目（这一页没有视频）');
-        await openNext();
+        await openNext().catch(pauseTask);
         return;
       }
       if (G.waiting) { playNow(); return; }
       // 同一份勾选重复点「开始」不再重排一遍（实测连点三次会留三条一样的队列日志）
       const ids = pickQueue().map((x) => x.id).join(',');
       if (job && job.queue.map((x) => x.id).join(',') === ids) { say('队列没变，这门课正在播；要换课先点「停」'); return; }
-      startQueue();
+      startQueue().catch(pauseTask);
     };
-    p.querySelector('#kg-stop').onclick = () => { clearJob(); G.running = false; say('已清空任务队列（不影响平台已记的账）'); renderCourses(); };
+    p.querySelector('#kg-stop').onclick = () => { if (!G.owner) { say('请在控制任务的标签页停止'); return; } clearJob(); G.waiting = false; G.running = false; say('已清空任务队列（不影响平台已记的账）'); renderCourses(); };
+    // 时长判据对不上（如「课程介绍」不计 haveTime）时，任务会一直卡在这门课。
+    // 给一个人工出口：跳过并把原因记进 job.skipped，不假装这门课已完成。
+    p.querySelector('#kg-skip').onclick = async () => {
+      if (!G.owner) { say('请在控制任务的标签页操作'); return; }
+      const job = loadJob();
+      if (!job) { say('没有进行中的任务，不用跳过'); return; }
+      const c = job.queue[job.i];
+      if (!c) { say('当前没有正在刷的课程'); return; }
+      job.skipped = (job.skipped || []).concat([{ id: c.id, name: c.name, at: Date.now() }]);
+      job.i++; saveJob(job); G.cur = job.queue[job.i] || null;
+      say(`已跳过「${String(c.name || '').slice(0, 12)}」并记入 job.skipped；服务端时长未核验，之后要补请重新勾选`);
+      renderCourses();
+      await openNext().catch(pauseTask);
+    };
     setInterval(() => {
       const a = document.getElementById('kg-beat'), b = document.getElementById('kg-mon'), c = document.getElementById('kg-pause'),
         d = document.getElementById('kg-pseen'), e = document.getElementById('kg-late');
@@ -788,12 +1063,16 @@
     // 实测播了 19 分钟面板还停在旧数字，用户以为没在记账。
     setInterval(() => {
       if (!G.list.length) return;
-      Promise.all(G.list.map((c) => courseDetails(c).catch(() => { }))).then(renderCourses);
+      // 单门课读取失败标成「时长未知」，不要把旧数字留着装正常
+      Promise.all(G.list.map((c) => courseDetails(c).then(() => { delete c._err; }, (e) => { c._err = String((e && e.message) || e); }))).then(renderCourses);
     }, 60000);
     setInterval(renderCourses, 8000);
     // 有任务但视频停着 = 在等人点播放键。这种情况必须把按钮变成提示，
     // 否则用户点完「开始」看到画面没动，只会认为面板是假的。
     setInterval(async () => {
+      if (G.ticking || G.answering || G.navigating) return;
+      G.ticking = true;
+      try {
       const btn = document.getElementById('kg-run');
       if (!btn) return;
       const job = loadJob();
@@ -814,13 +1093,17 @@
       }
       // 片尾判据不能提前：v0.4.1 写的是 duration-1.5，等于每条视频都被我们提前 1.5 秒拽走，
       // 服务端就记成"差 1 秒没看完"，得人工拖到最后看一眼才算完成。现在贴到真正结束再走。
-      const atEnd = !!(job && v && v.duration > 1 && (v.ended || v.currentTime >= v.duration - 0.15));
+      const atEnd = !!(job && onStudy() && v && reachedTail(v));
       if (atEnd && !G.navigating) {
         G.navigating = 1;
-        // 站点这个播放器到片尾会原地重播，所以先把指针按到最后一帧，给它一次"到点"的上报窗口
-        try { v.currentTime = Math.max(0, v.duration - 0.05); } catch (e) { }
         say('  这条播到头了，停 3 秒让站点把时长结清再跳下一条');
-        setTimeout(() => { nextInCourse(); }, 3000);
+        setTimeout(async () => {
+          try {
+            checkJob(job);
+            if (await nextInCourse()) tailReached.delete(v);
+          } catch (e) { pauseTask(e); }
+          finally { G.navigating = false; }
+        }, 3000);
         return;
       }
       // 有任务、视频停着、而且不是他亲手停的 → 面板自己发起播手势（v0.4.1：实测这样服务端就记账）。
@@ -834,14 +1117,17 @@
       const nowVid = new URLSearchParams(location.search).get('videoId');
       const idx = job && Array.isArray(job.todo) ? job.todo.findIndex((x) => x.id === nowVid) : -1;
       btn.textContent = !job ? '开始刷勾选的课程（排队）'
-        : stuck ? '▶ 停着呢：点我起播（或你亲手点播放键）'
+        : stuck ? (G.autoStart ? '▶ 停着呢：点我起播（或你亲手点播放键）' : '▶ 停着呢（自动起播已关）：点我起播')
         : `正在播 ${(G.cur ? G.cur.name.slice(0, 10) : '')}${idx >= 0 ? ` 第 ${idx + 1}/${job.todo.length} 条` : ''}（改勾选先点「停」）`;
       btn.style.background = stuck ? '#d97706' : '#16a34a';
+      } catch (e) { pauseTask(e); }
+      finally { G.ticking = false; }
     }, 3000);
     const job = loadJob();
     if (job && job.i < job.queue.length) { G.cur = job.queue[job.i]; say(`有未完成任务：第 ${job.i + 1}/${job.queue.length} 门「${G.cur.name}」，面板会自己起播接着走`); }
-    say('面板 v0.5.4 已加载（自动起播 + 同步接手 + 声音三态 + 节流看门狗 + 开关记忆）；页脚「暂停事件」有数而「接手」没涨 = 判据问题，两个都没涨 = 页面被 Chrome 冻住了');
-    scan();
+    else { const old = readJob(); if (old && old.paused) say(`上次任务已暂停：${old.reason || '原因未记录'}；处理后点「开始」继续（进度保留）`); }
+    say('面板 v0.5.6 已加载：接口失败暂停、逐题核验、换课前对账；页脚用于检查播放与心跳');
+    scanSafe();
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') setTimeout(build, 300);
